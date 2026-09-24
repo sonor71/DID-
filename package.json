@@ -1,0 +1,11 @@
+{
+  "name": "fraktum-messenger",
+  "private": true,
+  "version": "0.2.3",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "preview": "node server.mjs",
+    "build": "node build.mjs"
+  }
+}
