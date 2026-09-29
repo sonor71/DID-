@@ -1,0 +1,1 @@
+{"name":"fraktum-literature","private":true,"version":"0.17.0","type":"module","scripts":{"dev":"node server.mjs","preview":"node server.mjs","build":"node build.mjs"}}

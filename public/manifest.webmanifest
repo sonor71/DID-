@@ -1,0 +1,19 @@
+{
+  "name": "FRAKTUM — платформа для авторов и читателей",
+  "short_name": "FRAKTUM",
+  "description": "Социальная литературная платформа FRAKTUM",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#071019",
+  "theme_color": "#071019",
+  "lang": "ru",
+  "icons": [
+    {
+      "src": "/assets/home/brand.png",
+      "sizes": "any",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
