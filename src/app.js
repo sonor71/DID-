@@ -2,7 +2,9 @@ import {state,update,reset,save,xpToLevel} from './state.js';
 import {ANNOTATION_TYPES,FEEDBACK_CATEGORIES,GENRES} from './data.js';
 import * as pages from './pages.js';
 import {esc,modal,toast} from './ui.js';
-import {ensureSession,getSession,signOut,getMyProfile,updateMyProfile,fetchPublicFeed,createCloudPost,toggleCloudPostLike,fetchPostComments,createCloudComment,setCloudCommentReaction,isCloudAuthenticated,requestOtp,verifyOtp,createMyProfile,checkServerConnection,findProfileByUsername,getOrCreateDirectConversation,createCloudGroupConversation,fetchMyConversations,fetchConversationMessages,sendCloudMessage,getConversationPeer,createCloudCall,fetchIncomingCalls,getCloudCall,setCloudCallStatus,sendCloudCallSignal,fetchCloudCallSignals,fetchNotifications,markNotificationRead,markAllNotificationsRead,createReport,fetchModerationReports,setModerationReportStatus,requestAuthorVerification,fetchMyVerificationRequests,fetchVerificationRequests,resolveAuthorVerification,fetchCloudLiterature,saveCloudWork,saveCloudReview,setCloudReviewReaction,saveCloudReadingProgress} from './cloud.js';
+import {ensureSession,getSession,signOut,getMyProfile,updateMyProfile,fetchPublicFeed,createCloudPost,toggleCloudPostLike,fetchPostComments,createCloudComment,setCloudCommentReaction,isCloudAuthenticated,requestOtp,verifyOtp,createMyProfile,checkServerConnection,findProfileByUsername,getOrCreateDirectConversation,createCloudGroupConversation,fetchMyConversations,fetchConversationMessages,sendCloudMessage,getConversationPeer,createCloudCall,fetchIncomingCalls,getCloudCall,setCloudCallStatus,sendCloudCallSignal,fetchCloudCallSignals,fetchNotifications,markNotificationRead,markAllNotificationsRead,createReport,fetchModerationReports,setModerationReportStatus,requestAuthorVerification,fetchMyVerificationRequests,fetchVerificationRequests,resolveAuthorVerification,fetchCloudLiterature,saveCloudWork,saveCloudReview,setCloudReviewReaction,saveCloudReadingProgress,uploadWorkAsset,publicObjectUrl} from './cloud.js';
+import {AssetService} from './editor/AssetService.js';
+import {createEditorRoot} from './editor/EditorRoot.js';
 
 const app=document.querySelector('#app');
 let signupRole=null;
@@ -29,6 +31,21 @@ let notificationsTimer=null;
 let activeRtc=null;
 let callSignalTimer=null;
 const seenIncomingCalls=new Set();
+const workAssets=new AssetService({
+  upload:(path,file)=>uploadWorkAsset(path,file),
+  resolveUrl:path=>publicObjectUrl('lit-work-assets',`${getSession()?.user?.id}/${path}`)
+});
+const editorRoot=createEditorRoot({
+  readSnapshot:()=>structuredClone(currentCanvasState()?.canvas||null),
+  applySnapshot:snapshot=>{const ctx=currentCanvasState();if(!ctx||!snapshot)return;ctx.page.canvas=structuredClone(snapshot);save();render();},
+  onChange:()=>scheduleStudioAutosave()
+});
+document.addEventListener('keydown',event=>{
+  if(!(event.ctrlKey||event.metaKey)||event.key.toLowerCase()!=='z'||!document.querySelector('#freePageCanvas'))return;
+  if(event.target.closest?.('input,textarea,[contenteditable="true"]'))return;
+  event.preventDefault();event.stopImmediatePropagation();
+  if(event.shiftKey)editorRoot.redo();else editorRoot.undo();
+},true);
 
 function render(){
   if(!authReady){app.innerHTML='<main class="onboarding"><section class="onboard-card"><h2>Подключение к FRAKTUM…</h2><p class="muted">Проверяем сессию Supabase.</p></section></main>';return;}
@@ -290,7 +307,7 @@ function serializeCanvasObject(obj,old={}){
   const base={...old,id:obj.dataset.objectId,type:obj.dataset.objectType||old.type||'text',x:Number(obj.dataset.x)||0,y:Number(obj.dataset.y)||0,w:Number(obj.dataset.w)||100,h:Number(obj.dataset.h)||100,z:Number(obj.dataset.z)||1,rotation:Number(obj.dataset.rotation)||0,locked:obj.dataset.locked==='1'};
   if(base.type==='image'){
     const img=obj.querySelector('img');
-    return {...base,src:img?.getAttribute('src')||old.src||'',alt:img?.getAttribute('alt')||old.alt||'',fit:obj.dataset.fit||old.fit||'cover',radius:Number(obj.dataset.radius)||0,opacity:obj.dataset.opacity==null?(old.opacity??1):Number(obj.dataset.opacity),wrap:obj.dataset.wrap||old.wrap||'auto',gap:Number(obj.dataset.gap)||14};
+    return {...base,assetId:old.assetId||'',storagePath:old.storagePath||'',src:img?.getAttribute('src')||old.src||'',alt:img?.getAttribute('alt')||old.alt||'',fit:obj.dataset.fit||old.fit||'cover',radius:Number(obj.dataset.radius)||0,opacity:obj.dataset.opacity==null?(old.opacity??1):Number(obj.dataset.opacity),wrap:obj.dataset.wrap||old.wrap||'auto',gap:Number(obj.dataset.gap)||14};
   }
   const content=obj.querySelector('.canvas-text-content');
   return {...base,html:content?cleanCanvasTextHtml(content):(old.html||'<p><br></p>'),flow:obj.dataset.flow!=='0',role:obj.dataset.role||old.role||'',style:{...(old.style||{}),fontFamily:obj.dataset.fontFamily||old.style?.fontFamily||'Georgia',fontSize:Number(obj.dataset.fontSize)||old.style?.fontSize||18,lineHeight:Number(obj.dataset.lineHeight)||old.style?.lineHeight||1.55,color:obj.dataset.baseColor||old.style?.color||null,align:obj.dataset.align||old.style?.align||'left',background:obj.dataset.bg||old.style?.background||'transparent',padding:Number(obj.dataset.padding)||old.style?.padding||6}};
@@ -346,10 +363,10 @@ function showCanvasGuides(canvas,obj){
 }
 function clearCanvasGuides(canvas){canvas?.classList.remove('show-guide-v','show-guide-h');}
 function finishCanvasObjectGesture(obj,canvas){
-  obj?.classList.remove('is-dragging','is-resizing','is-rotating');clearCanvasGuides(canvas);syncCanvasDomToState();save();attachCanvasWrapProxies();updateCanvasInspector();
+  obj?.classList.remove('is-dragging','is-resizing','is-rotating');clearCanvasGuides(canvas);syncCanvasDomToState();editorRoot.commit();save();attachCanvasWrapProxies();updateCanvasInspector();
 }
 function startCanvasDrag(e,obj){
-  if(!obj||obj.dataset.locked==='1'||e.button!==0)return;e.preventDefault();e.stopPropagation();
+  if(!obj||obj.dataset.locked==='1'||e.button!==0)return;e.preventDefault();e.stopPropagation();editorRoot.begin('move');
   const canvas=obj.closest('#freePageCanvas');if(!canvas)return;selectCanvasObject(obj);obj.classList.add('is-dragging');
   const start=canvasPointerToUnits(canvas,e.clientX,e.clientY),ox=Number(obj.dataset.x)||0,oy=Number(obj.dataset.y)||0,w=Number(obj.dataset.w)||100,h=Number(obj.dataset.h)||100;
   const target=e.currentTarget;try{target.setPointerCapture(e.pointerId);}catch{}
@@ -358,13 +375,13 @@ function startCanvasDrag(e,obj){
   target.addEventListener('pointermove',move);target.addEventListener('pointerup',up);target.addEventListener('pointercancel',up);
 }
 function startCanvasResize(e,obj,dir){
-  if(!obj||obj.dataset.locked==='1'||e.button!==0)return;e.preventDefault();e.stopPropagation();const canvas=obj.closest('#freePageCanvas');if(!canvas)return;selectCanvasObject(obj);obj.classList.add('is-resizing');
+  if(!obj||obj.dataset.locked==='1'||e.button!==0)return;e.preventDefault();e.stopPropagation();editorRoot.begin('resize');const canvas=obj.closest('#freePageCanvas');if(!canvas)return;selectCanvasObject(obj);obj.classList.add('is-resizing');
   const start=canvasPointerToUnits(canvas,e.clientX,e.clientY),ox=Number(obj.dataset.x)||0,oy=Number(obj.dataset.y)||0,ow=Number(obj.dataset.w)||100,oh=Number(obj.dataset.h)||100,ratio=ow/Math.max(1,oh),isImage=obj.dataset.objectType==='image';const target=e.currentTarget;try{target.setPointerCapture(e.pointerId);}catch{}
   const move=ev=>{const pt=canvasPointerToUnits(canvas,ev.clientX,ev.clientY);let dx=pt.x-start.x,dy=pt.y-start.y,x=ox,y=oy,w=ow,h=oh;const minW=isImage?60:90,minH=isImage?50:48;if(dir.includes('e'))w=Math.max(minW,ow+dx);if(dir.includes('s'))h=Math.max(minH,oh+dy);if(dir.includes('w')){w=Math.max(minW,ow-dx);x=ox+(ow-w);}if(dir.includes('n')){h=Math.max(minH,oh-dy);y=oy+(oh-h);}if(isImage&&!ev.shiftKey&&dir.length===2){if(Math.abs(dx)>Math.abs(dy)){h=w/ratio;if(dir.includes('n'))y=oy+oh-h;}else{w=h*ratio;if(dir.includes('w'))x=ox+ow-w;}}w=Math.min(w,PAGE_CANVAS_W-x);h=Math.min(h,PAGE_CANVAS_H-y);x=clampCanvas(x,0,PAGE_CANVAS_W-w);y=clampCanvas(y,0,PAGE_CANVAS_H-h);obj.dataset.x=String(x);obj.dataset.y=String(y);obj.dataset.w=String(w);obj.dataset.h=String(h);applyCanvasObjectGeometry(obj);attachCanvasWrapProxies();};
   const up=ev=>{try{target.releasePointerCapture(ev.pointerId);}catch{}target.removeEventListener('pointermove',move);target.removeEventListener('pointerup',up);target.removeEventListener('pointercancel',up);finishCanvasObjectGesture(obj,canvas);};target.addEventListener('pointermove',move);target.addEventListener('pointerup',up);target.addEventListener('pointercancel',up);
 }
 function startCanvasRotate(e,obj){
-  if(!obj||obj.dataset.locked==='1'||e.button!==0)return;e.preventDefault();e.stopPropagation();const canvas=obj.closest('#freePageCanvas');if(!canvas)return;selectCanvasObject(obj);obj.classList.add('is-rotating');const or=obj.getBoundingClientRect(),cx=or.left+or.width/2,cy=or.top+or.height/2;const startAngle=Math.atan2(e.clientY-cy,e.clientX-cx)*180/Math.PI,base=Number(obj.dataset.rotation)||0,target=e.currentTarget;try{target.setPointerCapture(e.pointerId);}catch{}
+  if(!obj||obj.dataset.locked==='1'||e.button!==0)return;e.preventDefault();e.stopPropagation();editorRoot.begin('rotate');const canvas=obj.closest('#freePageCanvas');if(!canvas)return;selectCanvasObject(obj);obj.classList.add('is-rotating');const or=obj.getBoundingClientRect(),cx=or.left+or.width/2,cy=or.top+or.height/2;const startAngle=Math.atan2(e.clientY-cy,e.clientX-cx)*180/Math.PI,base=Number(obj.dataset.rotation)||0,target=e.currentTarget;try{target.setPointerCapture(e.pointerId);}catch{}
   const move=ev=>{let angle=base+(Math.atan2(ev.clientY-cy,ev.clientX-cx)*180/Math.PI-startAngle);if(!ev.altKey)angle=Math.round(angle/5)*5;obj.dataset.rotation=String(Math.round(angle));applyCanvasObjectGeometry(obj);updateCanvasInspector();};
   const up=ev=>{try{target.releasePointerCapture(ev.pointerId);}catch{}target.removeEventListener('pointermove',move);target.removeEventListener('pointerup',up);target.removeEventListener('pointercancel',up);finishCanvasObjectGesture(obj,canvas);};target.addEventListener('pointermove',move);target.addEventListener('pointerup',up);target.addEventListener('pointercancel',up);
 }
@@ -396,21 +413,21 @@ function attachCanvasInteractions(){
 async function handleCanvasImageDrop(e){
   const canvas=e.currentTarget;canvas.classList.remove('is-file-over');const file=[...e.dataTransfer?.files||[]].find(f=>f.type?.startsWith('image/'));if(!file)return;e.preventDefault();
   if(file.size>12_000_000){alert('Изображение слишком большое. Максимум 12 МБ.');return;}
-  try{const pt=canvasPointerToUnits(canvas,e.clientX,e.clientY),src=await optimizeImageForStudio(file);const ctx=currentCanvasState();if(ctx){ctx.w.mediaLibrary??=[];ctx.w.mediaLibrary.push({src,name:file.name});}addCanvasImageObject(src,file.name,pt.x-140,pt.y-110);}catch(err){alert(`Не удалось обработать изображение: ${err.message}`);}
+  try{const pt=canvasPointerToUnits(canvas,e.clientX,e.clientY),asset=await uploadStudioAsset(file);const ctx=currentCanvasState();if(ctx){ctx.w.mediaLibrary??=[];ctx.w.mediaLibrary.push(asset);}addCanvasImageObject(asset.url,file.name,pt.x-140,pt.y-110,asset);}catch(err){alert(`Не удалось обработать изображение: ${err.message}`);}
 }
 async function handleCanvasImagePaste(e){
   const file=[...e.clipboardData?.files||[]].find(f=>f.type?.startsWith('image/'));if(!file)return;e.preventDefault();
-  try{const src=await optimizeImageForStudio(file),ctx=currentCanvasState();if(ctx){ctx.w.mediaLibrary??=[];ctx.w.mediaLibrary.push({src,name:file.name||'Вставленное изображение'});}addCanvasImageObject(src,file.name||'Вставленное изображение',240,250);}catch(err){alert(`Не удалось вставить изображение: ${err.message}`);}
+  try{const asset=await uploadStudioAsset(file),ctx=currentCanvasState();if(ctx){ctx.w.mediaLibrary??=[];ctx.w.mediaLibrary.push(asset);}addCanvasImageObject(asset.url,file.name||'Вставленное изображение',240,250,asset);}catch(err){alert(`Не удалось вставить изображение: ${err.message}`);}
 }
 function addCanvasTextObject(kind='text',x=100,y=120){
-  const ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();const id=`text-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,note=kind==='note';const z=Math.max(0,...ctx.canvas.objects.map(o=>Number(o.z)||0))+1;ctx.canvas.objects.push({id,type:'text',x:clampCanvas(x,0,PAGE_CANVAS_W-260),y:clampCanvas(y,0,PAGE_CANVAS_H-120),w:note?300:360,h:note?180:150,z,rotation:0,html:note?'<p>Новая заметка</p>':'<p>Введите текст…</p>',flow:!note,locked:false,style:{fontFamily:'Georgia',fontSize:note?20:18,lineHeight:1.45,color:note?'#34230f':null,align:'left',background:note?'#fff1a8':'transparent',padding:note?18:8}});update(s=>s.ui.canvasSelectedObjectId=id,{persist:false});save();render();requestAnimationFrame(()=>{const el=document.querySelector(`[data-object-id="${CSS.escape(id)}"] .canvas-text-content`);if(el){el.focus();const sel=getSelection();sel?.selectAllChildren(el);}});
+  const ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();editorRoot.begin('create text');const id=`text-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,note=kind==='note';const z=Math.max(0,...ctx.canvas.objects.map(o=>Number(o.z)||0))+1;ctx.canvas.objects.push({id,type:'text',x:clampCanvas(x,0,PAGE_CANVAS_W-260),y:clampCanvas(y,0,PAGE_CANVAS_H-120),w:note?300:360,h:note?180:150,z,rotation:0,html:note?'<p>Новая заметка</p>':'<p>Введите текст…</p>',flow:!note,locked:false,style:{fontFamily:'Georgia',fontSize:note?20:18,lineHeight:1.45,color:note?'#34230f':null,align:'left',background:note?'#fff1a8':'transparent',padding:note?18:8}});update(s=>s.ui.canvasSelectedObjectId=id,{persist:false});editorRoot.commit();save();render();requestAnimationFrame(()=>{const el=document.querySelector(`[data-object-id="${CSS.escape(id)}"] .canvas-text-content`);if(el){el.focus();const sel=getSelection();sel?.selectAllChildren(el);}});
 }
-function addCanvasImageObject(src,name,x=220,y=220){
-  const ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();const id=`image-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,z=Math.max(0,...ctx.canvas.objects.map(o=>Number(o.z)||0))+1;ctx.canvas.objects.push({id,type:'image',x:clampCanvas(x,0,PAGE_CANVAS_W-280),y:clampCanvas(y,0,PAGE_CANVAS_H-220),w:280,h:220,z,rotation:0,src:String(src||''),alt:String(name||'Фото'),fit:'cover',radius:0,opacity:1,wrap:'auto',gap:14,locked:false});update(s=>s.ui.canvasSelectedObjectId=id,{persist:false});save();render();
+function addCanvasImageObject(src,name,x=220,y=220,asset={}){
+  const ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();editorRoot.begin('create image');const id=`image-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,z=Math.max(0,...ctx.canvas.objects.map(o=>Number(o.z)||0))+1;ctx.canvas.objects.push({id,type:'image',x:clampCanvas(x,0,PAGE_CANVAS_W-280),y:clampCanvas(y,0,PAGE_CANVAS_H-220),w:280,h:220,z,rotation:0,assetId:asset.assetId||'',storagePath:asset.storagePath||'',src:String(src||''),alt:String(name||'Фото'),fit:'cover',radius:0,opacity:1,wrap:'auto',gap:14,locked:false});update(s=>s.ui.canvasSelectedObjectId=id,{persist:false});editorRoot.commit();save();render();
 }
-function deleteSelectedCanvasObject(){if(!selectedCanvasObject)return;const id=selectedCanvasObject.dataset.objectId,ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();ctx.canvas.objects=ctx.canvas.objects.filter(o=>o.id!==id);update(s=>s.ui.canvasSelectedObjectId=null,{persist:false});selectedCanvasObject=null;save();render();}
-function duplicateSelectedCanvasObject(){if(!selectedCanvasObject)return;const id=selectedCanvasObject.dataset.objectId,ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();const source=ctx.canvas.objects.find(o=>o.id===id);if(!source)return;const clone=structuredClone(source);clone.id=`${source.type}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;clone.x=clampCanvas((source.x||0)+28,0,PAGE_CANVAS_W-(source.w||100));clone.y=clampCanvas((source.y||0)+28,0,PAGE_CANVAS_H-(source.h||100));clone.z=Math.max(0,...ctx.canvas.objects.map(o=>Number(o.z)||0))+1;ctx.canvas.objects.push(clone);update(s=>s.ui.canvasSelectedObjectId=clone.id,{persist:false});save();render();}
-function setCanvasLayer(mode){if(!selectedCanvasObject)return;const canvas=selectedCanvasObject.closest('#freePageCanvas');if(!canvas)return;const objects=[...canvas.querySelectorAll(':scope > .canvas-object')].sort((a,b)=>(Number(a.dataset.z)||0)-(Number(b.dataset.z)||0));let i=objects.indexOf(selectedCanvasObject);if(i<0)return;let j=i;if(mode==='front')j=objects.length-1;else if(mode==='back')j=0;else if(mode==='forward')j=Math.min(objects.length-1,i+1);else if(mode==='backward')j=Math.max(0,i-1);objects.splice(i,1);objects.splice(j,0,selectedCanvasObject);objects.forEach((o,k)=>{o.dataset.z=String(k+1);o.style.zIndex=String(k+1);});syncCanvasDomToState();save();}
+function deleteSelectedCanvasObject(){if(!selectedCanvasObject)return;const id=selectedCanvasObject.dataset.objectId,ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();editorRoot.begin('delete');ctx.canvas.objects=ctx.canvas.objects.filter(o=>o.id!==id);update(s=>s.ui.canvasSelectedObjectId=null,{persist:false});selectedCanvasObject=null;editorRoot.commit();save();render();}
+function duplicateSelectedCanvasObject(){if(!selectedCanvasObject)return;const id=selectedCanvasObject.dataset.objectId,ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();editorRoot.begin('duplicate');const source=ctx.canvas.objects.find(o=>o.id===id);if(!source)return;const clone=structuredClone(source);clone.id=`${source.type}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;clone.x=clampCanvas((source.x||0)+28,0,PAGE_CANVAS_W-(source.w||100));clone.y=clampCanvas((source.y||0)+28,0,PAGE_CANVAS_H-(source.h||100));clone.z=Math.max(0,...ctx.canvas.objects.map(o=>Number(o.z)||0))+1;ctx.canvas.objects.push(clone);update(s=>s.ui.canvasSelectedObjectId=clone.id,{persist:false});editorRoot.commit();save();render();}
+function setCanvasLayer(mode){if(!selectedCanvasObject)return;editorRoot.begin('layer');const canvas=selectedCanvasObject.closest('#freePageCanvas');if(!canvas)return;const objects=[...canvas.querySelectorAll(':scope > .canvas-object')].sort((a,b)=>(Number(a.dataset.z)||0)-(Number(b.dataset.z)||0));let i=objects.indexOf(selectedCanvasObject);if(i<0)return;let j=i;if(mode==='front')j=objects.length-1;else if(mode==='back')j=0;else if(mode==='forward')j=Math.min(objects.length-1,i+1);else if(mode==='backward')j=Math.max(0,i-1);objects.splice(i,1);objects.splice(j,0,selectedCanvasObject);objects.forEach((o,k)=>{o.dataset.z=String(k+1);o.style.zIndex=String(k+1);});syncCanvasDomToState();editorRoot.commit();save();}
 function toggleCanvasLock(){if(!selectedCanvasObject)return;selectedCanvasObject.dataset.locked=selectedCanvasObject.dataset.locked==='1'?'0':'1';selectedCanvasObject.classList.toggle('is-locked',selectedCanvasObject.dataset.locked==='1');syncCanvasDomToState();save();updateCanvasInspector();}
 function setCanvasObjectProperty(prop,value,live=false){
   const obj=selectedCanvasObject;if(!obj)return;const img=obj.querySelector('img');
@@ -435,7 +452,7 @@ function applyCanvasBackgroundDom(){
 function setPageBackgroundColor(color){const ctx=currentCanvasState();if(!ctx)return;ctx.canvas.background.color=String(color);applyCanvasBackgroundDom();scheduleStudioAutosave();}
 function setPageTextColor(color){const ctx=currentCanvasState();if(!ctx)return;ctx.canvas.textColor=String(color);applyCanvasBackgroundDom();scheduleStudioAutosave();}
 function setPageBackgroundFit(fit){const ctx=currentCanvasState();if(!ctx)return;ctx.canvas.background.fit=fit==='contain'?'contain':'cover';applyCanvasBackgroundDom();scheduleStudioAutosave();}
-function setPageBackgroundImage(src){const ctx=currentCanvasState();if(!ctx)return;ctx.canvas.background.image=String(src||'');applyCanvasBackgroundDom();save();}
+function setPageBackgroundImage(src){const ctx=currentCanvasState();if(!ctx)return;editorRoot.begin('background');ctx.canvas.background.image=String(src||'');editorRoot.commit();applyCanvasBackgroundDom();save();}
 function clearPageBackgroundImage(){setPageBackgroundImage('');}
 function mergeBands(bands){const sorted=bands.filter(b=>b.end>b.start).sort((a,b)=>a.start-b.start),out=[];for(const b of sorted){const last=out.at(-1);if(last&&b.start<=last.end)last.end=Math.max(last.end,b.end);else out.push({...b});}return out;}
 function exclusionGradient(bands,height){const m=mergeBands(bands);if(!m.length)return 'none';const stops=['transparent 0%'];for(const b of m){const a=clampCanvas(b.start/height*100,0,100),z=clampCanvas(b.end/height*100,0,100);stops.push(`transparent ${a.toFixed(2)}%`,`rgba(0,0,0,1) ${a.toFixed(2)}%`,`rgba(0,0,0,1) ${z.toFixed(2)}%`,`transparent ${z.toFixed(2)}%`);}stops.push('transparent 100%');return `linear-gradient(to bottom,${stops.join(',')})`;}
@@ -568,21 +585,19 @@ async function handleMediaUpload(e){
   if(file.size>12_000_000){alert('Изображение слишком большое. Максимум 12 МБ.');e.target.value='';return;}
   const form=document.querySelector('#workEditor'); const id=form?.dataset.id; if(!id)return;
   try{
-    const src=await optimizeImageForStudio(file);
+    const asset=await uploadStudioAsset(file);
+    const src=asset.url;
     const bookMode=state.works.find(x=>x.id===id)?.editorMode==='book';
-    update(s=>{const w=s.works.find(x=>x.id===id);if(w)(w.mediaLibrary??=[]).push({src,name:file.name});},{persist:true});
-    if(bookMode)addCanvasImageObject(src,file.name);else render();
+    update(s=>{const w=s.works.find(x=>x.id===id);if(w)(w.mediaLibrary??=[]).push(asset);},{persist:true});
+    if(bookMode)addCanvasImageObject(src,file.name,220,220,asset);else render();
   }catch(err){alert(`Не удалось обработать изображение: ${err.message}`);}finally{e.target.value='';}
 }
-async function optimizeImageForStudio(file){
-  if(file.type==='image/svg+xml')return await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result));r.onerror=()=>reject(r.error);r.readAsDataURL(file);});
-  const url=URL.createObjectURL(file);try{
-    const img=new Image();img.decoding='async';await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=()=>reject(new Error('Файл не является читаемым изображением'));img.src=url;});
-    const max=1800,scale=Math.min(1,max/Math.max(img.naturalWidth,img.naturalHeight));const w=Math.max(1,Math.round(img.naturalWidth*scale)),h=Math.max(1,Math.round(img.naturalHeight*scale));
-    const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';ctx.drawImage(img,0,0,w,h);
-    return canvas.toDataURL('image/webp',.86);
-  }finally{URL.revokeObjectURL(url);}
+async function uploadStudioAsset(file){
+  const workId=currentCanvasState()?.w?.cloudId||currentCanvasState()?.w?.id||'draft';
+  if(!isCloudAuthenticated())throw new Error('Для загрузки изображения нужна активная облачная сессия');
+  return workAssets.uploadImage(file,{workId:String(workId).replace(/^cloud:/,'')});
 }
+
 function startCreateProject(type,mode){
   const id='w-'+Date.now();
   update(s=>{
@@ -1055,6 +1070,36 @@ async function sendThreadMessage(form,fd){
     update(s=>s.ui.selectedChatId=id,{persist:false});
     await refreshCloudChats(false);render();
   }catch(err){alert(`Сообщение не отправлено: ${err.message}`);}
+}
+
+function saveNotes(){
+  const notes=document.querySelector('#privateNotes');if(!notes)return;
+  update(s=>{s.privateNotes=String(notes.value||'');});notify('Заметки сохранены на этом устройстве');
+}
+
+function joinCommunity(id){
+  const community=state.communities.find(item=>item.id===id);if(!community)return;
+  update(s=>{const index=s.joinedCommunities.indexOf(id);if(index>=0){s.joinedCommunities.splice(index,1);community.members=Math.max(0,community.members-1);}else{s.joinedCommunities.push(id);community.members+=1;}});render();
+}
+
+function communityDialog(){
+  openModal(`<h2>Создать сообщество</h2><form id="communityForm"><label>Название<input name="name" maxlength="80" required></label><label>Описание<textarea name="description" maxlength="500" required></textarea></label><label>Тип<select name="type"><option>Авторы</option><option>Читатели</option><option>Фандом</option><option>Флуд</option></select></label><label>Доступ<select name="privacy"><option value="public">Открытое</option><option value="private">По заявке</option></select></label><button class="primary wide">Создать</button></form>`);
+}
+
+function submitCommunity(fd){
+  const name=String(fd.get('name')||'').trim(),description=String(fd.get('description')||'').trim();if(!name||!description)return;
+  const id=`community-${crypto.randomUUID()}`;
+  update(s=>{s.communities.unshift({id,name,description,type:String(fd.get('type')||'Авторы'),privacy:fd.get('privacy')==='private'?'private':'public',members:1});s.joinedCommunities.push(id);s.ui.selectedCommunityId=id;s.ui.page='community';s.ui.modal=null;});render();
+}
+
+function generateSummary(workId){
+  const work=state.works.find(item=>item.id===workId);if(!work)return;
+  const reviews=state.reviews.filter(review=>review.workId===workId);
+  if(!reviews.length){notify('Для сводки пока недостаточно рецензий');return;}
+  const average=reviews.reduce((sum,review)=>sum+Number(review.rating||0),0)/reviews.length;
+  const categories={};for(const review of reviews)for(const [name,value] of Object.entries(review.categories||{}))(categories[name]??=[]).push(Number(value)||0);
+  const ranked=Object.entries(categories).map(([name,values])=>[name,values.reduce((a,b)=>a+b,0)/values.length]).sort((a,b)=>b[1]-a[1]);
+  openModal(`<h2>Сводка: ${esc(work.title)}</h2><p>На основе ${reviews.length} рецензий средняя оценка — <b>${average.toFixed(1)} / 5</b>.</p>${ranked.length?`<p>Сильнее всего читатели оценили: <b>${esc(ranked[0][0])}</b> (${ranked[0][1].toFixed(1)}).</p><p>Основная зона роста: <b>${esc(ranked.at(-1)[0])}</b> (${ranked.at(-1)[1].toFixed(1)}).</p>`:'<p>Категориальных оценок пока нет.</p>'}<button class="primary wide" data-action="close-modal">Закрыть</button>`);
 }
 
 function collaborationGroupDialog(){
