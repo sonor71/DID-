@@ -52,7 +52,7 @@ function chatDrawer(){
 export function onboarding(){
   return `<main class="onboarding"><section class="onboard-card">
     <div class="brand-lockup"><img src="/assets/home/brand.png" alt="FRAKTUM"><div><h1>FRAKTUM</h1><p>Литературная платформа для авторов и читателей</p></div></div>
-    <div class="step-badge">v0.17 · Free Canvas Book Studio</div>
+    <div class="step-badge">v0.18 · Free Canvas Book Studio</div>
     <h2>Кем вы хотите пользоваться платформой?</h2>
     <p class="muted">Роль можно изменить позже. Автор получает публикацию произведений, полный Book Studio и аналитику.</p>
     <div class="role-grid">

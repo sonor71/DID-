@@ -108,6 +108,13 @@ export async function uploadPublicMedia(bucket,path,file){
   await parse(res);return publicObjectUrl(bucket,path);
 }
 
+export async function uploadWorkAsset(path,file){
+  await ensureSession();if(!session?.user?.id)throw new Error('Войдите в аккаунт');
+  if(!String(path).startsWith(`${session.user.id}/`))path=`${session.user.id}/${path}`;
+  const url=await uploadPublicMedia('lit-work-assets',path,file);
+  return {storagePath:path,url};
+}
+
 export async function fetchPublicFeed(){
   const posts=await rest('lit_posts?visibility=eq.public&select=id,author_id,post_type,body,work_id,version_id,created_at&order=created_at.desc&limit=50');
   if(!posts?.length)return [];
