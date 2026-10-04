@@ -8,31 +8,37 @@ let outgoingPending = false;
 let outgoingActive = false;
 let outgoingPendingTimer = null;
 let notificationPromptShown = false;
+let soundUnlockPromptShown = false;
+let soundGeneration = 0;
 
-function ensureAudioContext() {
+function getAudioContext() {
   if (!AUDIO_CTX) return null;
   if (!audioCtx) audioCtx = new AUDIO_CTX();
-  if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
   return audioCtx;
 }
 
-function primeAudio() {
-  const ctx = ensureAudioContext();
-  if (!ctx || ctx.state !== 'running') return;
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  gain.gain.value = 0.00001;
-  osc.connect(gain).connect(ctx.destination);
-  osc.start();
-  osc.stop(ctx.currentTime + 0.02);
+async function unlockAudio() {
+  const ctx = getAudioContext();
+  if (!ctx) return false;
+  try {
+    if (ctx.state === 'suspended') await ctx.resume();
+    if (ctx.state !== 'running') return false;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    gain.gain.value = 0.00001;
+    osc.connect(gain).connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.025);
+    return true;
+  } catch (error) {
+    console.warn('FRAKTUM call audio unlock failed', error);
+    return false;
+  }
 }
 
-document.addEventListener('pointerdown', primeAudio, { capture: true });
-document.addEventListener('keydown', primeAudio, { capture: true });
-
-function playTone(freq, durationMs, volume = 0.055, type = 'sine', delayMs = 0) {
-  const ctx = ensureAudioContext();
-  if (!ctx || ctx.state !== 'running') return;
+function playTone(freq, durationMs, volume = 0.1, type = 'sine', delayMs = 0) {
+  const ctx = getAudioContext();
+  if (!ctx || ctx.state !== 'running') return false;
   const start = ctx.currentTime + delayMs / 1000;
   const end = start + durationMs / 1000;
   const osc = ctx.createOscillator();
@@ -40,50 +46,117 @@ function playTone(freq, durationMs, volume = 0.055, type = 'sine', delayMs = 0) 
   osc.type = type;
   osc.frequency.setValueAtTime(freq, start);
   gain.gain.setValueAtTime(0.0001, start);
-  gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, volume), start + 0.025);
-  gain.gain.setValueAtTime(Math.max(0.0002, volume), Math.max(start + 0.03, end - 0.06));
+  gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, volume), start + 0.03);
+  gain.gain.setValueAtTime(Math.max(0.0002, volume), Math.max(start + 0.04, end - 0.07));
   gain.gain.exponentialRampToValueAtTime(0.0001, end);
   osc.connect(gain).connect(ctx.destination);
   osc.start(start);
-  osc.stop(end + 0.02);
+  osc.stop(end + 0.03);
+  return true;
 }
 
 function playIncomingPhrase() {
-  // Short FRAKTUM-style chime: melodic enough to feel like a ringtone,
-  // but generated locally so it has no external audio dependency.
-  [
-    [659.25, 0],
-    [783.99, 210],
-    [987.77, 420],
-    [783.99, 650],
-    [659.25, 880]
-  ].forEach(([freq, delay]) => playTone(freq, 170, 0.05, 'triangle', delay));
+  // Noticeable melodic FRAKTUM ringtone.
+  const notes = [
+    [659.25, 0, 230],
+    [783.99, 250, 230],
+    [987.77, 500, 300],
+    [783.99, 850, 230],
+    [659.25, 1100, 330]
+  ];
+  let played = false;
+  for (const [freq, delay, length] of notes) {
+    played = playTone(freq, length, 0.12, 'triangle', delay) || played;
+    playTone(freq / 2, length, 0.035, 'sine', delay);
+  }
+  return played;
 }
 
 function playOutgoingPhrase() {
-  // Familiar ringback pulse for the caller.
-  playTone(440, 1200, 0.035, 'sine', 0);
-  playTone(480, 1200, 0.025, 'sine', 0);
+  // Classic dual-tone ringback, deliberately louder than the previous build.
+  const a = playTone(440, 1100, 0.085, 'sine', 0);
+  const b = playTone(480, 1100, 0.065, 'sine', 0);
+  return a || b;
+}
+
+function removeSoundUnlockPrompt() {
+  document.querySelector('#fraktumSoundUnlock')?.remove();
+  soundUnlockPromptShown = false;
+}
+
+function showSoundUnlockPrompt() {
+  if (soundUnlockPromptShown || !soundMode) return;
+  soundUnlockPromptShown = true;
+  const box = document.createElement('div');
+  box.id = 'fraktumSoundUnlock';
+  Object.assign(box.style, {
+    position: 'fixed',
+    left: '50%',
+    bottom: '20px',
+    transform: 'translateX(-50%)',
+    zIndex: '100001',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    width: 'min(430px, calc(100vw - 28px))',
+    padding: '12px 14px',
+    borderRadius: '15px',
+    background: 'rgba(8, 16, 31, .98)',
+    border: '1px solid rgba(121, 105, 255, .55)',
+    boxShadow: '0 18px 50px rgba(0,0,0,.45)',
+    color: '#eef3ff',
+    fontFamily: 'inherit'
+  });
+  box.innerHTML = '<div style="flex:1"><b>Звук звонка заблокирован браузером</b><div style="font-size:12px;opacity:.72;margin-top:2px">Нажмите один раз, чтобы FRAKTUM мог воспроизводить звонки.</div></div><button id="fraktumUnlockSound" style="border:0;border-radius:10px;padding:9px 12px;background:#7567ff;color:white;font-weight:700;cursor:pointer">Включить звук</button>';
+  document.body.appendChild(box);
+  box.querySelector('#fraktumUnlockSound')?.addEventListener('click', async () => {
+    const ok = await unlockAudio();
+    if (!ok) return;
+    removeSoundUnlockPrompt();
+    if (soundMode === 'incoming') playIncomingPhrase();
+    if (soundMode === 'outgoing') playOutgoingPhrase();
+  });
 }
 
 function stopCallSound() {
-  if (soundTimer) clearInterval(soundTimer);
+  soundGeneration += 1;
+  if (soundTimer) clearTimeout(soundTimer);
   soundTimer = null;
   soundMode = null;
+  removeSoundUnlockPrompt();
 }
 
-function startCallSound(mode) {
+async function startCallSound(mode) {
   if (soundMode === mode) return;
   stopCallSound();
   soundMode = mode;
-  if (mode === 'incoming') {
-    playIncomingPhrase();
-    soundTimer = setInterval(playIncomingPhrase, 3300);
-  } else if (mode === 'outgoing') {
-    playOutgoingPhrase();
-    soundTimer = setInterval(playOutgoingPhrase, 3900);
-  }
+  const generation = ++soundGeneration;
+
+  const repeat = async () => {
+    if (generation !== soundGeneration || soundMode !== mode) return;
+    const unlocked = await unlockAudio();
+    if (generation !== soundGeneration || soundMode !== mode) return;
+
+    if (!unlocked) {
+      showSoundUnlockPrompt();
+      soundTimer = setTimeout(repeat, 1200);
+      return;
+    }
+
+    removeSoundUnlockPrompt();
+    const played = mode === 'incoming' ? playIncomingPhrase() : playOutgoingPhrase();
+    if (!played) showSoundUnlockPrompt();
+    soundTimer = setTimeout(repeat, mode === 'incoming' ? 3400 : 3900);
+  };
+
+  repeat();
 }
+
+// Unlock as early as possible after any real user interaction.
+const prime = () => { unlockAudio().catch(() => {}); };
+document.addEventListener('pointerdown', prime, { capture: true });
+document.addEventListener('touchstart', prime, { capture: true, passive: true });
+document.addEventListener('keydown', prime, { capture: true });
 
 function showNotificationOptIn() {
   if (notificationPromptShown || !('Notification' in window) || Notification.permission !== 'default') return;
@@ -93,30 +166,17 @@ function showNotificationOptIn() {
   const box = document.createElement('div');
   box.id = 'fraktumCallNotificationOptIn';
   Object.assign(box.style, {
-    position: 'fixed',
-    right: '18px',
-    bottom: '18px',
-    zIndex: '100000',
-    width: 'min(360px, calc(100vw - 36px))',
-    padding: '14px',
-    borderRadius: '16px',
-    background: 'rgba(9, 18, 34, .97)',
-    border: '1px solid rgba(125, 112, 255, .42)',
-    boxShadow: '0 18px 50px rgba(0,0,0,.35)',
-    color: '#eef3ff',
-    fontFamily: 'inherit'
+    position: 'fixed', right: '18px', bottom: '18px', zIndex: '100000',
+    width: 'min(360px, calc(100vw - 36px))', padding: '14px', borderRadius: '16px',
+    background: 'rgba(9, 18, 34, .97)', border: '1px solid rgba(125, 112, 255, .42)',
+    boxShadow: '0 18px 50px rgba(0,0,0,.35)', color: '#eef3ff', fontFamily: 'inherit'
   });
-  box.innerHTML = `
-    <div style="font-weight:700;margin-bottom:5px">Уведомления о звонках</div>
-    <div style="font-size:13px;line-height:1.4;opacity:.78;margin-bottom:11px">Разрешите браузеру показывать входящий звонок, когда вкладка FRAKTUM не на переднем плане.</div>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button id="fraktumCallNotifyLater" style="border:0;border-radius:10px;padding:8px 11px;background:#17233a;color:#dbe7ff;cursor:pointer">Позже</button>
-      <button id="fraktumCallNotifyEnable" style="border:0;border-radius:10px;padding:8px 11px;background:#7667ff;color:white;font-weight:700;cursor:pointer">Включить</button>
-    </div>`;
+  box.innerHTML = '<div style="font-weight:700;margin-bottom:5px">Уведомления о звонках</div><div style="font-size:13px;line-height:1.4;opacity:.78;margin-bottom:11px">Разрешите FRAKTUM показывать входящие звонки вне активной вкладки.</div><div style="display:flex;gap:8px;justify-content:flex-end"><button id="fraktumCallNotifyLater" style="border:0;border-radius:10px;padding:8px 11px;background:#17233a;color:#dbe7ff;cursor:pointer">Позже</button><button id="fraktumCallNotifyEnable" style="border:0;border-radius:10px;padding:8px 11px;background:#7667ff;color:white;font-weight:700;cursor:pointer">Включить</button></div>';
   document.body.appendChild(box);
   box.querySelector('#fraktumCallNotifyLater')?.addEventListener('click', () => box.remove());
   box.querySelector('#fraktumCallNotifyEnable')?.addEventListener('click', async () => {
     try { await Notification.requestPermission(); } catch {}
+    await unlockAudio();
     box.remove();
   });
 }
@@ -131,13 +191,12 @@ function notifyIncomingCall({ id, caller, mode }) {
       tag: `fraktum-call-${id || 'incoming'}`,
       renotify: true,
       requireInteraction: true,
-      silent: true
+      silent: false
     });
-    n.onclick = () => {
-      window.focus();
-      n.close();
-    };
-  } catch {}
+    n.onclick = () => { window.focus(); n.close(); };
+  } catch (error) {
+    console.warn('FRAKTUM call notification failed', error);
+  }
 }
 
 function detectIncomingCall() {
@@ -147,11 +206,9 @@ function detectIncomingCall() {
     currentIncomingId = null;
     return;
   }
-
   const actionButton = modal.querySelector('[data-action="accept-cloud-call"], [data-action="decline-cloud-call"]');
   const id = actionButton?.dataset.id || 'incoming';
   if (currentIncomingId === id) return;
-
   currentIncomingId = id;
   const caller = modal.querySelector('h2')?.textContent?.trim() || 'Пользователь';
   const eyebrow = modal.querySelector('.eyebrow')?.textContent || '';
@@ -163,7 +220,6 @@ function detectIncomingCall() {
 function detectOutgoingCall() {
   const overlay = document.querySelector('#realCallOverlay');
   const status = document.querySelector('#realCallStatus')?.textContent?.trim() || '';
-
   if (outgoingPending && overlay && !outgoingActive) {
     outgoingPending = false;
     outgoingActive = true;
@@ -171,12 +227,9 @@ function detectOutgoingCall() {
     outgoingPendingTimer = null;
     startCallSound('outgoing');
   }
-
-  if (outgoingActive) {
-    if (!overlay || ['Соединено', 'Звонок отклонён', 'Звонок завершён', 'Связь прервана'].includes(status)) {
-      outgoingActive = false;
-      if (soundMode === 'outgoing') stopCallSound();
-    }
+  if (outgoingActive && (!overlay || ['Соединено', 'Звонок отклонён', 'Звонок завершён', 'Связь прервана'].includes(status))) {
+    outgoingActive = false;
+    if (soundMode === 'outgoing') stopCallSound();
   }
 }
 
@@ -185,14 +238,13 @@ function scanCallUi() {
   detectOutgoingCall();
 }
 
-document.addEventListener('click', (event) => {
+document.addEventListener('click', async (event) => {
   const target = event.target.closest?.('[data-action], #realCallHangup');
   if (!target) return;
-
   const action = target.dataset?.action;
 
   if (action === 'start-call') {
-    ensureAudioContext();
+    await unlockAudio();
     outgoingPending = true;
     outgoingActive = false;
     if (outgoingPendingTimer) clearTimeout(outgoingPendingTimer);
@@ -208,6 +260,7 @@ document.addEventListener('click', (event) => {
   }
 
   if (action === 'toggle-chat-panel' || (action === 'navigate' && target.dataset?.page === 'messages')) {
+    await unlockAudio();
     showNotificationOptIn();
   }
 
@@ -221,9 +274,18 @@ document.addEventListener('click', (event) => {
 
 const observer = new MutationObserver(scanCallUi);
 observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
-setInterval(scanCallUi, 500);
+setInterval(scanCallUi, 400);
 
 window.addEventListener('pagehide', stopCallSound);
 window.addEventListener('beforeunload', stopCallSound);
+
+// Small debug API: useful in DevTools and harmless in production.
+window.FraktumCallAudio = {
+  unlock: unlockAudio,
+  testIncoming: async () => { await unlockAudio(); stopCallSound(); soundMode = 'incoming'; playIncomingPhrase(); },
+  testOutgoing: async () => { await unlockAudio(); stopCallSound(); soundMode = 'outgoing'; playOutgoingPhrase(); },
+  stop: stopCallSound,
+  state: () => ({ audioState: audioCtx?.state || 'not-created', soundMode })
+};
 
 scanCallUi();
