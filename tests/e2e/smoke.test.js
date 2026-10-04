@@ -4,11 +4,11 @@ test.before(async()=>{server=spawn(process.execPath,['server.mjs'],{env:{...proc
 test.after(()=>server?.kill());
 test('application serves onboarding shell and editor modules',async()=>{
  const html=await (await fetch('http://127.0.0.1:5199/')).text();assert.match(html,/id="app"/);assert.match(html,/src="\/src\/app\.js"/);
- for(const path of ['/src/app.js','/src/pages.js','/src/editor/EditorRoot.js','/src/editor/HistoryManager.js','/src/editor/AssetService.js'])assert.equal((await fetch(`http://127.0.0.1:5199${path}`)).status,200);
+ for(const path of ['/src/app.js','/src/pages.js','/src/editor/EditorRoot.js','/src/editor/HistoryManager.js','/src/editor/AssetService.js','/src/profile/ProfileView.js','/src/evaluation/EvaluationService.js','/src/feedback/FeedbackView.js'])assert.equal((await fetch(`http://127.0.0.1:5199${path}`)).status,200);
 });
 test('major navigation and editor actions are registered without missing functions',async()=>{
  const app=await (await fetch('http://127.0.0.1:5199/src/app.js')).text();const pages=await (await fetch('http://127.0.0.1:5199/src/pages.js')).text();
- for(const page of ['home','read','evaluate','library','create','communities','messages','profile','admin','reader'])assert.match(app,new RegExp(`${page}:pages\\.`));
+ for(const page of ['home','read','evaluate','library','create','communities','messages','profile','admin','reader','feedback'])assert.match(app,new RegExp(`${page}:pages\\.`));
  for(const action of ['canvas-add-text','insert-canvas-media','canvas-delete','preview-work','open-community'])assert.match(app,new RegExp(`action==='${action}'`));
  assert.doesNotMatch(pages,/onclick\s*=/);
 });

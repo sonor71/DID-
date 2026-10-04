@@ -2,9 +2,14 @@ import {state,update,reset,save,xpToLevel} from './state.js';
 import {ANNOTATION_TYPES,FEEDBACK_CATEGORIES,GENRES} from './data.js';
 import * as pages from './pages.js';
 import {esc,modal,toast} from './ui.js';
-import {ensureSession,getSession,signOut,getMyProfile,updateMyProfile,fetchPublicFeed,createCloudPost,toggleCloudPostLike,fetchPostComments,createCloudComment,setCloudCommentReaction,isCloudAuthenticated,requestOtp,verifyOtp,createMyProfile,checkServerConnection,findProfileByUsername,getOrCreateDirectConversation,createCloudGroupConversation,fetchMyConversations,fetchConversationMessages,sendCloudMessage,getConversationPeer,createCloudCall,fetchIncomingCalls,getCloudCall,setCloudCallStatus,sendCloudCallSignal,fetchCloudCallSignals,fetchNotifications,markNotificationRead,markAllNotificationsRead,createReport,fetchModerationReports,setModerationReportStatus,requestAuthorVerification,fetchMyVerificationRequests,fetchVerificationRequests,resolveAuthorVerification,fetchCloudLiterature,saveCloudWork,saveCloudReview,setCloudReviewReaction,saveCloudReadingProgress,uploadWorkAsset,publicObjectUrl} from './cloud.js';
+import {ensureSession,getSession,signOut,getMyProfile,updateMyProfile,fetchPublicFeed,createCloudPost,toggleCloudPostLike,fetchPostComments,createCloudComment,setCloudCommentReaction,isCloudAuthenticated,requestOtp,verifyOtp,createMyProfile,checkServerConnection,findProfileByUsername,getOrCreateDirectConversation,createCloudGroupConversation,fetchMyConversations,fetchConversationMessages,sendCloudMessage,getConversationPeer,createCloudCall,fetchIncomingCalls,getCloudCall,setCloudCallStatus,sendCloudCallSignal,fetchCloudCallSignals,fetchNotifications,markNotificationRead,markAllNotificationsRead,createReport,fetchModerationReports,setModerationReportStatus,requestAuthorVerification,fetchMyVerificationRequests,fetchVerificationRequests,resolveAuthorVerification,fetchCloudLiterature,saveCloudWork,saveCloudReview,setCloudReviewReaction,saveCloudReadingProgress,uploadWorkAsset,publicObjectUrl,fetchDiscoveryCatalogs,fetchMyProfileDetails,replaceMyProfileDetails,uploadProfileMedia,createEvaluationSession,completeEvaluationItem,fetchEvaluationCatalog,saveCloudFragment,createCloudAnnotation,deleteCloudAnnotation,fetchAuthorFeedback} from './cloud.js';
 import {AssetService} from './editor/AssetService.js';
 import {createEditorRoot} from './editor/EditorRoot.js';
+import {profileEditor} from './profile/ProfileEditor.js';
+import {normalizePreferences,normalizeUrl,parseRows,profilePayload} from './profile/ProfileService.js';
+import {cropProfileImage} from './profile/ProfileMediaService.js';
+import {captureTextAnchor} from './annotations/TextAnchor.js';
+import {advanceSession,createLocalSession,validateSessionSize} from './evaluation/EvaluationService.js';
 
 const app=document.querySelector('#app');
 let signupRole=null;
@@ -17,6 +22,7 @@ let readerFont=18;
 let readerTheme=0;
 let animateChatOpen=false;
 let savedEditorRange=null;
+let selectedTextAnchor=null;
 let selectedMediaFigure=null;
 let selectedCanvasObject=null;
 const PAGE_CANVAS_W=760;
@@ -50,7 +56,7 @@ document.addEventListener('keydown',event=>{
 function render(){
   if(!authReady){app.innerHTML='<main class="onboarding"><section class="onboard-card"><h2>Подключение к FRAKTUM…</h2><p class="muted">Проверяем сессию Supabase.</p></section></main>';return;}
   if(!isCloudAuthenticated()||!state.user||forceAuthScreen){ const auth={method:authMethod,pending:otpPending,fromApp:false}; app.innerHTML= loginMode?pages.loginPage(auth):(signupRole?pages.registration(signupRole,auth):pages.onboarding()); attachSpecial(); return; }
-  const map={home:pages.home,evaluate:pages.evaluatePage,evaluation:pages.evaluationSession,read:pages.readDiscovery,work:pages.workDetailPage,reader:pages.readerPage,library:pages.library,create:pages.createPage,notes:pages.notesPage,specialists:pages.specialistsPage,communities:pages.communitiesPage,community:pages.communityDetail,messages:pages.messagesPage,journal:pages.journalPage,profile:pages.profilePage,analytics:pages.analyticsPage,admin:pages.adminPage};
+  const map={home:pages.home,evaluate:pages.evaluatePage,evaluation:pages.evaluationSession,read:pages.readDiscovery,work:pages.workDetailPage,reader:pages.readerPage,library:pages.library,create:pages.createPage,notes:pages.notesPage,specialists:pages.specialistsPage,communities:pages.communitiesPage,community:pages.communityDetail,messages:pages.messagesPage,journal:pages.journalPage,profile:pages.profilePage,analytics:pages.analyticsPage,admin:pages.adminPage,feedback:pages.feedbackPage};
   app.innerHTML=(map[state.ui.page]||pages.home)();
   if(state.ui.modal) app.insertAdjacentHTML('beforeend',state.ui.modal);
   if(state.ui.toast){ app.insertAdjacentHTML('beforeend',toast(state.ui.toast)); setTimeout(()=>{update(s=>s.ui.toast=null,{persist:false}); const t=document.querySelector('.toast'); if(t)t.remove();},1800); }
@@ -104,6 +110,12 @@ function attachSpecial(){
     if(control.type==='color') control.addEventListener('input',()=>applyEditorTool(control.dataset.editorTool,control.value));
   });
   const upload=document.querySelector('#mediaUpload'); if(upload) upload.addEventListener('change',handleMediaUpload);
+  const avatarUpload=document.querySelector('#profileAvatarUpload');if(avatarUpload)avatarUpload.addEventListener('change',event=>handleProfileMedia(event,'avatar'));
+  const bannerUpload=document.querySelector('#profileBannerUpload');if(bannerUpload)bannerUpload.addEventListener('change',event=>handleProfileMedia(event,'banner'));
+  document.querySelectorAll('[data-tag-search]').forEach(input=>input.addEventListener('input',()=>{const query=input.value.trim().toLowerCase();input.closest('.preference-selector')?.querySelectorAll('[data-tag-label]').forEach(label=>{label.hidden=!!query&&!label.dataset.tagLabel.includes(query);});}));
+  document.querySelectorAll('.preference-selector input[type="checkbox"]').forEach(input=>input.addEventListener('change',()=>{
+    if(!input.checked)return;const [domain,side]=input.closest('[data-preference-kind]').dataset.preferenceKind.split('-');const opposite=document.querySelector(`[data-preference-kind="${domain}-${side==='wanted'?'unwanted':'wanted'}"] input[value="${CSS.escape(input.value)}"]`);if(opposite)opposite.checked=false;
+  }));
   const widthSlider=document.querySelector('#mediaWidthSlider');
   if(widthSlider) widthSlider.addEventListener('input',()=>setMediaSize(widthSlider.value,true));
   const gapSlider=document.querySelector('#mediaGapSlider');
@@ -601,7 +613,7 @@ async function uploadStudioAsset(file){
 function startCreateProject(type,mode){
   const id='w-'+Date.now();
   update(s=>{
-    const blank={id,authorId:s.user.id,author:s.user.name,title:'Без названия',kind:type==='evaluation'?'Фрагмент':'Роман',genres:[],summary:'',cover:'/assets/home/reading-cover.png',version:'0.1',rating:0,ratingsCount:0,authorActivity:20,createdAt:new Date().toISOString(),minutes:2,publicationStatus:'draft',evaluationStatus:'closed',status:'draft',targetType:'Фрагмент',evaluationTarget:'Фрагмент',evaluationText:'',feedbackWanted:[],content:'',creationType:type,editorMode:mode,documentPages:[{id:'doc-'+Date.now(),html:'<p><br></p>'}],bookPages:[makeCanvasPage('cover','Без названия',s.user.name),makeCanvasPage('title','Без названия',s.user.name),makeCanvasPage('content','Без названия',s.user.name)],mediaLibrary:[]};
+    const blank={id,authorId:s.user.id,author:s.user.name,title:'Без названия',kind:type==='fragment'?'Фрагмент':'Роман',genres:[],summary:'',cover:'/assets/home/reading-cover.png',version:'0.1',rating:0,ratingsCount:0,authorActivity:20,createdAt:new Date().toISOString(),minutes:2,publicationStatus:'draft',evaluationStatus:'closed',status:'draft',targetType:'Фрагмент',evaluationTarget:'Фрагмент',evaluationText:'',feedbackWanted:[],content:'',creationType:type,writingStatus:type==='draft'?'draft':'writing',editorMode:mode,documentPages:[{id:'doc-'+Date.now(),html:'<p><br></p>'}],bookPages:[makeCanvasPage('cover','Без названия',s.user.name),makeCanvasPage('title','Без названия',s.user.name),makeCanvasPage('content','Без названия',s.user.name)],mediaLibrary:[]};
     s.works.unshift(blank);s.ui.selectedStudioWorkId=id;s.ui.createDraftType=null;s.ui.bookPageIndex=0;s.ui.bookViewMode=false;s.ui.bookSpreadIndex=0;s.ui.page='create';
   }); render();
 }
@@ -626,11 +638,19 @@ function cloudUserFrom(profile,authUser,fallback={}){
     isAdmin:!!profile?.is_admin,
     xp:profile?.xp||0,
     reputation:profile?.reviewer_reputation||0,
+    bio:profile?.bio||fallback.bio||'',currentStatus:profile?.current_status||fallback.currentStatus||'',interests:profile?.interests||fallback.interests||[],favoriteTopics:profile?.favorite_topics||fallback.favoriteTopics||[],
+    avatarPath:profile?.avatar_path||fallback.avatarPath||'',avatarUrl:profile?.avatar_path?publicObjectUrl('lit-avatars',profile.avatar_path):(fallback.avatarUrl||''),bannerPath:profile?.banner_path||fallback.bannerPath||'',bannerUrl:profile?.banner_path?publicObjectUrl('lit-profile-banners',profile.banner_path):(fallback.bannerUrl||''),
     preferences:profile?.wanted_genres||fallback.preferences||[],
     avoid:profile?.unwanted_genres||fallback.avoid||[],
     cloud:true,
     createdAt:new Date().toISOString()
   };
+}
+function mergeProfileDetails(user,details,catalogs){
+  const genreName=new Map(catalogs.genres.map(item=>[Number(item.id),item.name]));
+  const ids=(rows,preference)=>rows.filter(row=>row.preference===preference).map(row=>Number(row.genre_id??row.topic_id));
+  Object.assign(user,{favoriteBooks:details.favoriteBooks,socialLinks:details.socialLinks,followers:details.followers,following:details.following,achievements:details.achievements||[],wantedGenreIds:ids(details.genrePreferences,'wanted'),unwantedGenreIds:ids(details.genrePreferences,'unwanted'),wantedTopicIds:ids(details.topicPreferences,'wanted'),unwantedTopicIds:ids(details.topicPreferences,'unwanted')});
+  user.wantedGenreNames=user.wantedGenreIds.map(id=>genreName.get(id)).filter(Boolean);
 }
 async function waitForProfile(){
   for(let i=0;i<4;i++){
@@ -703,6 +723,7 @@ async function handleOtpVerify(e){
       }
     }
     const user=cloudUserFrom(profile,auth.user,fallback);
+    await refreshIdentityData(user);
     update(s=>{s.user=user;s.ui.page='home';s.cloud={...(s.cloud||{}),connected:true,serverOnline:true,lastSync:new Date().toISOString(),error:null};});
     signupRole=null;loginMode=false;otpPending=null;forceAuthScreen=false;await refreshCloudLiterature();await refreshCloudFeed();await refreshCloudChats(false);await refreshNotifications(false);if(user.isAdmin)await refreshAdminData(false);startCloudPolling();render();
   }catch(err){alert(`Код не подтверждён: ${err.message}`);}
@@ -711,6 +732,9 @@ async function handleOtpVerify(e){
 async function refreshCloudFeed(){
   if(!isCloudAuthenticated())return;
   try{const cloud=await fetchPublicFeed();update(s=>{s.posts=cloud;s.cloud={...(s.cloud||{}),connected:true,serverOnline:true,lastSync:new Date().toISOString(),error:null};},{persist:false});cloudFeedLoaded=true;}catch(err){update(s=>{s.cloud={...(s.cloud||{}),connected:isCloudAuthenticated(),lastSync:null,error:err.message};},{persist:false});}
+}
+async function refreshIdentityData(user){
+  const [catalogs,details]=await Promise.all([fetchDiscoveryCatalogs(),fetchMyProfileDetails()]);mergeProfileDetails(user,details,catalogs);update(s=>{s.catalogs=catalogs;s.user=user;},{persist:true});
 }
 
 async function refreshCloudLiterature(){
@@ -887,8 +911,9 @@ function animateBookTurn({reader=false,direction=1}){
 }
 
 function captureSelection(){
-  const sel=window.getSelection(); const quote=sel?.toString().trim();
-  if(quote && quote.length>=2) update(s=>s.ui.selectedQuote=quote,{persist:false});
+  const text=document.querySelector('#readerText'),sel=window.getSelection();selectedTextAnchor=captureTextAnchor(text,sel);const quote=selectedTextAnchor?.selectedText;
+  document.querySelector('#annotationQuickbar')?.remove();
+  if(quote&&quote.length>=2){update(s=>s.ui.selectedQuote=quote,{persist:false});const bar=document.createElement('div');bar.id='annotationQuickbar';bar.className='annotation-quickbar';bar.innerHTML=ANNOTATION_TYPES.map(([type,label])=>`<button data-action="annotation-type" data-type="${type}">${label}</button>`).join('');text?.closest('.reader-sheet')?.appendChild(bar);}
 }
 
 function searchGlobal(q){
@@ -916,9 +941,14 @@ app.addEventListener('click',async e=>{
   if(action==='cloud-login'){forceAuthScreen=true;loginMode=true;signupRole=null;otpPending=null;render();return;}
   if(action==='cloud-logout'){stopCloudPolling();if(activeRtc)await finishLocalCall(false);await signOut();update(s=>{s.user=null;s.posts=[];s.chatThreads=[];s.peopleDirectory=[];s.friends=[];s.cloud={...(s.cloud||{}),connected:false};},{persist:false});loginMode=true;forceAuthScreen=false;render();return;}
   if(action==='back-onboarding'){signupRole=null;otpPending=null;render();return;}
-  if(action==='navigate'){if(el.dataset.page==='admin')await refreshAdminData(false);go(el.dataset.page);return;}
+  if(action==='navigate'){if(el.dataset.page==='admin')await refreshAdminData(false);if(el.dataset.page==='feedback')await refreshAuthorFeedback();go(el.dataset.page);return;}
   if(action==='toggle-sidebar'){update(s=>s.ui.sidebarOpen=!s.ui.sidebarOpen,{persist:false});render();return;}
   if(action==='start-evaluation') return startEvaluation();
+  if(action==='evaluation-session-dialog') return evaluationSessionDialog();
+  if(action==='evaluation-catalog') return openEvaluationCatalog();
+  if(action==='evaluation-mode-home'){update(s=>{s.ui.evaluationMode=null;s.evaluationSession=null;},{persist:false});render();return;}
+  if(action==='evaluation-catalog-open') return openCatalogEvaluation(el.dataset.version);
+  if(action==='evaluation-session-next') return advanceEvaluationSession();
   if(action==='evaluation-filters') return evaluationFiltersDialog();
   if(action==='close-modal'){closeModal();return;}
   if(action==='close-modal-local'){closeModal();return;}
@@ -930,11 +960,13 @@ app.addEventListener('click',async e=>{
   if(action==='apply-read-filters') return applyReadFilters();
   if(action==='reset-read-filters') return resetReadFilters();
   if(action==='save-selection') return annotationDialog();
+  if(action==='annotation-type') return annotationDialog(el.dataset.type);
   if(action==='delete-annotation') return deleteAnnotation(el.dataset.work,el.dataset.scope||'evaluation',Number(el.dataset.index));
   if(action==='open-review') return reviewDialog(el.dataset.id,el.dataset.mode||'full');
   if(action==='react-review') return reactReview(el.dataset.id,el.dataset.kind);
   if(action==='reply-review') return replyReviewDialog(el.dataset.id);
   if(action==='report-review') return reportDialog('review',el.dataset.id);
+  if(action==='feedback-work'){update(s=>s.ui.feedbackWorkId=el.dataset.id,{persist:false});render();return;}
   if(action==='profile-tab'){update(s=>s.ui.profileTab=el.dataset.tab,{persist:false});render();return;}
   if(action==='open-post') return postDialog();
   if(action==='open-notifications'){await refreshNotifications(false);notificationCenter();return;}
@@ -1021,13 +1053,14 @@ app.addEventListener('change',e=>{
 });
 
 app.addEventListener('submit',async e=>{
-  if(e.target.id==='annotationForm'){e.preventDefault();saveAnnotation(new FormData(e.target));}
+  if(e.target.id==='annotationForm'){e.preventDefault();await saveAnnotation(new FormData(e.target));}
   if(e.target.id==='reviewForm'){e.preventDefault();await submitReview(new FormData(e.target));}
   if(e.target.id==='postForm'){e.preventDefault();await submitPost(new FormData(e.target));}
   if(e.target.id==='reportForm'){e.preventDefault();const fd=new FormData(e.target);try{await createReport({targetType:fd.get('targetType'),targetId:fd.get('targetId'),reason:fd.get('reason'),details:fd.get('details')});closeModal();notify('Жалоба отправлена модерации');}catch(err){alert(`Не удалось отправить жалобу: ${err.message}`);}}
   if(e.target.id==='authorVerificationForm'){e.preventDefault();const fd=new FormData(e.target);try{await requestAuthorVerification(String(fd.get('note')||''));closeModal();notify('Заявка отправлена. После проверки статус обновится.');}catch(err){alert(`Не удалось отправить заявку: ${err.message}`);}}
   if(e.target.id==='postCommentForm'){e.preventDefault();await submitPostComment(new FormData(e.target));}
   if(e.target.id==='evaluationFiltersForm'){e.preventDefault();saveEvaluationFilters(new FormData(e.target));}
+  if(e.target.id==='evaluationSessionForm'){e.preventDefault();await beginEvaluationSession(new FormData(e.target));}
   if(e.target.id==='readFiltersForm'){e.preventDefault();saveReadFilters(new FormData(e.target));}
   if(e.target.id==='communityForm'){e.preventDefault();submitCommunity(new FormData(e.target));}
   if(e.target.id==='profileForm'){e.preventDefault();await saveProfile(new FormData(e.target));}
@@ -1163,6 +1196,24 @@ function applyReadFilters(){
 }
 function resetReadFilters(){update(s=>s.ui.readFilters={query:'',genre:'',length:''});render();}
 
+function evaluationSessionDialog(){
+  openModal(`<h2>Быстрая сессия</h2><p class="muted">Набор фиксируется при старте и не меняется в процессе.</p><form id="evaluationSessionForm"><div class="session-size-options">${[3,5,10,20].map(size=>`<label><input type="radio" name="size" value="${size}" ${size===5?'checked':''}><span>${size}</span></label>`).join('')}</div><label>Другое количество<input name="customSize" type="number" min="1" max="50" placeholder="1–50"></label><button class="primary wide">Начать</button></form>`);
+}
+async function beginEvaluationSession(fd){
+  let size;try{size=validateSessionSize(fd.get('customSize')||fd.get('size'));}catch(error){alert(error.message);return;}
+  try{const result=await createEvaluationSession(size),session=createLocalSession(result.items,size,result.id);update(s=>{s.evaluationSession=session;s.ui.evaluationMode='session';s.ui.page='evaluation';s.ui.modal=null;s.ui.selectedQuote='';},{persist:false});render();}catch(error){alert(`Не удалось создать сессию: ${error.message}`);}
+}
+async function openEvaluationCatalog(){
+  try{const items=await fetchEvaluationCatalog({limit:24});update(s=>{s.evaluationCatalog=items;s.ui.evaluationMode='catalog';},{persist:false});render();}catch(error){alert(`Каталог недоступен: ${error.message}`);}
+}
+function openCatalogEvaluation(versionId){
+  const item=state.evaluationCatalog.find(entry=>entry.versionId===versionId);if(!item)return;const session=createLocalSession([item],1,`catalog:${versionId}`);update(s=>{s.evaluationSession=session;s.ui.page='evaluation';s.ui.selectedQuote='';},{persist:false});render();
+}
+async function advanceEvaluationSession(){
+  const session=state.evaluationSession;if(!session)return;const item=session.items[session.currentIndex];
+  if(!String(session.id).startsWith('catalog:')){try{await completeEvaluationItem(session.id,item.position);}catch(error){alert(`Прогресс не сохранён: ${error.message}`);return;}}
+  const next=advanceSession(session);update(s=>{s.evaluationSession=next;s.ui.selectedQuote='';if(next.status==='completed'){s.ui.page='evaluate';s.ui.evaluationMode=null;}},{persist:false});if(next.status==='completed')notify('Сессия завершена');else render();
+}
 function startEvaluation(){
   const candidates=pages.getEvaluationCandidates();
   if(!candidates.length){notify('По текущим фильтрам нет подходящих отрывков');return;}
@@ -1205,13 +1256,17 @@ async function reactPostComment(postId,commentId,kind){
   try{await setCloudCommentReaction(commentId,kind);await postCommentsDialog(postId);}catch(err){alert(err.message);}
 }
 
-function annotationDialog(){
-  const quote=(state.ui.selectedQuote||'').trim(); if(!quote){notify('Сначала выделите фразу в тексте');return;}
-  const scope=state.ui.page==='evaluation'?'evaluation':'full';
-  openModal(`<h2>Пометка к тексту</h2><blockquote>“${esc(quote.slice(0,500))}”</blockquote><form id="annotationForm"><input type="hidden" name="scope" value="${scope}"><input type="hidden" name="quote" value="${esc(quote)}"><label>Тип<select name="type">${ANNOTATION_TYPES.map(([v,l])=>`<option value="${v}">${l}</option>`).join('')}</select></label><label>Комментарий<textarea name="comment" rows="4" placeholder="Почему вы это отметили?"></textarea></label><div class="modal-actions"><button type="button" data-action="close-modal" onclick="this.closest('.modal-backdrop').remove()">Отмена</button><button class="primary">Сохранить пометку</button></div></form>`);
+function annotationDialog(selectedType='unclear'){
+  const quote=(state.ui.selectedQuote||'').trim();if(!quote){notify('Сначала выделите фразу в тексте');return;}const type=ANNOTATION_TYPES.some(([value])=>value===selectedType)?selectedType:'unclear',label=ANNOTATION_TYPES.find(([value])=>value===type)?.[1];
+  openModal(`<h2>${label}</h2><blockquote>“${esc(quote.slice(0,500))}”</blockquote><form id="annotationForm"><input type="hidden" name="type" value="${type}"><label>Пояснение <span class="muted">необязательно</span><textarea name="comment" rows="4" placeholder="Почему вы отметили этот фрагмент?"></textarea></label><div class="modal-actions"><button type="button" data-action="close-modal">Отмена</button><button class="primary">Сохранить</button></div></form>`);
 }
-function saveAnnotation(fd){const w=state.ui.page==='evaluation'?state.ui.evaluationWorkId:state.ui.selectedWorkId;const scope=String(fd.get('scope')||'full');const key=`${w}:${scope}`;const type=fd.get('type');const label=ANNOTATION_TYPES.find(x=>x[0]===type)?.[1]||type;update(s=>{(s.annotations[key]??=[]).push({type,label,quote:String(fd.get('quote')).slice(0,800),comment:String(fd.get('comment')||'').trim()});s.ui.selectedQuote='';s.ui.modal=null;});render();}
-function deleteAnnotation(work,scope,index){const key=`${work}:${scope}`;update(s=>s.annotations[key]?.splice(index,1));render();}
+async function saveAnnotation(fd){
+  const sessionItem=state.evaluationSession?.items?.[state.evaluationSession.currentIndex],legacy=state.ui.evaluationWorkId,localWork=state.works.find(work=>work.id===(sessionItem?.workId||legacy));const type=String(fd.get('type')||'comment'),body=String(fd.get('comment')||'').trim(),anchor=selectedTextAnchor||{selectedText:state.ui.selectedQuote};
+  const payload={type,body,...anchor,workId:sessionItem?.cloudWorkId||localWork?.cloudId||null,versionId:sessionItem?.versionId||localWork?.cloudVersionId||null,fragmentId:sessionItem?.fragmentId||null};if(!payload.workId&&!payload.fragmentId){alert('Пометка требует облачную версию или фрагмент');return;}
+  try{const saved=await createCloudAnnotation(payload),key=`${sessionItem?.workId||legacy}:evaluation`,label=ANNOTATION_TYPES.find(([value])=>value===type)?.[1]||type;update(s=>{(s.annotations[key]??=[]).push({id:saved.id,type,label,quote:anchor.selectedText,comment:body,anchor});s.ui.selectedQuote='';s.ui.modal=null;});selectedTextAnchor=null;render();}catch(error){alert(`Пометка не сохранена: ${error.message}`);}
+}
+async function deleteAnnotation(work,scope,index){const key=`${work}:${scope}`,annotation=state.annotations[key]?.[index];try{if(annotation?.id)await deleteCloudAnnotation(annotation.id);update(s=>s.annotations[key]?.splice(index,1));render();}catch(error){alert(`Пометка не удалена: ${error.message}`);}}
+async function refreshAuthorFeedback(){try{const rows=await fetchAuthorFeedback();update(s=>s.authorFeedback=rows||[],{persist:false});}catch(error){console.warn('feedback sync',error);}}
 
 function reviewDialog(workId,scope='full'){
   const w=state.works.find(x=>x.id===workId); const existing=state.reviews.find(r=>r.workId===workId&&r.version===w.version&&r.authorId===state.user.id&&((r.scope||'evaluation')===scope));
@@ -1262,12 +1317,12 @@ function collectEditor(){
   let content='';
   if(w.editorMode==='book') content=(w.bookPages||[]).filter(p=>p.type==='content').map(p=>(p.canvas?.objects||[]).filter(o=>o.type==='text').map(o=>textFromHtml(o.html)).filter(Boolean).join('\n')).filter(Boolean).join('\n\n');
   else content=(w.documentPages||[]).map(p=>textFromHtml(p.html)).filter(Boolean).join('\n\n');
-  const evaluationText=w.creationType==='evaluation'?content:String(fd.get('evaluationText')||w.evaluationText||'');
+  const evaluationText=w.creationType==='fragment'?content:String(fd.get('evaluationText')||w.evaluationText||'');
   return {id:f.dataset.id,title:String(fd.get('title')||w.title||'').trim(),kind:fd.get('kind')||w.kind,genres:String(fd.get('genres')||'').split(',').map(x=>x.trim()).filter(Boolean),summary:String(fd.get('summary')||'').trim(),targetType:String(fd.get('targetType')||w.targetType||'Фрагмент'),evaluationTarget:String(fd.get('evaluationTarget')||w.evaluationTarget||'Фрагмент').trim(),evaluationText,feedbackWanted:fd.getAll('feedback'),content};
 }
 async function saveWork(mode='draft'){
   const x=collectEditor(); if(!x||!x.title){alert('Укажите название.');return;}
-  const current=state.works.find(z=>z.id===x.id); const fragment=current?.creationType==='evaluation';
+  const current=state.works.find(z=>z.id===x.id); const fragment=current?.creationType==='fragment';
   if(mode==='published'&&!x.content.trim()){alert('Чтобы опубликовать полное произведение, добавьте текст.');return;}
   if(mode==='evaluation'&&!x.evaluationText.trim()&&!x.content.trim()){alert('Добавьте текст для оценки.');return;}
   update(s=>{
@@ -1281,6 +1336,7 @@ async function saveWork(mode='draft'){
   const local=state.works.find(z=>z.id===x.id);
   if(isCloudAuthenticated()&&state.user?.role==='author'&&state.user?.verified&&local){
     try{
+      if(fragment){const result=await saveCloudFragment(local,{publish:mode==='evaluation'});update(s=>{const w=s.works.find(z=>z.id===local.id);if(w){w.fragmentCloudId=result.id;w.publicationStatus=result.visibility==='public'?'published':'draft';}});notify(mode==='evaluation'?'Фрагмент опубликован для оценки':'Фрагмент сохранён');return;}
       const result=await saveCloudWork(local,{mode});
       const oldId=local.id;const newId=`cloud:${result.work.id}`;
       update(s=>{const w=s.works.find(z=>z.id===oldId);if(!w)return;w.id=newId;w.cloud=true;w.cloudId=result.work.id;w.cloudVersionId=result.version.id;w.version=String(result.version.version_no);if(s.ui.selectedStudioWorkId===oldId)s.ui.selectedStudioWorkId=newId;if(s.ui.selectedWorkId===oldId)s.ui.selectedWorkId=newId;for(const key of ['later','reading','completed'])s.library[key]=s.library[key].map(id=>id===oldId?newId:id);if(s.readingProgress[oldId]!=null){s.readingProgress[newId]=s.readingProgress[oldId];delete s.readingProgress[oldId];}});
@@ -1298,8 +1354,19 @@ function newVersion(){
   update(s=>{w.version=`${a}.${(b||0)+1}`;w.cloudVersionId=null;w.publicationStatus='draft';w.evaluationStatus='closed';w.status='draft';});notify('Создана новая версия. Старые отзывы остались у предыдущей версии.');
 }
 
-function profileDialog(){const u=state.user;openModal(`<h2>Редактировать профиль</h2><form id="profileForm"><div class="form-grid two"><label>Никнейм<input name="nickname" value="${esc(u.nickname||u.name||'')}"></label><label>Username<input name="username" value="${esc(u.username||'')}"></label></div><div class="form-grid two"><label>Имя<input name="firstName" value="${esc(u.firstName||'')}"></label><label>Фамилия<input name="lastName" value="${esc(u.lastName||'')}"></label></div><fieldset><legend>Желаемые жанры</legend><div class="chip-checks">${GENRES.map(g=>`<label><input type="checkbox" name="genres" value="${g}" ${(u.preferences||[]).includes(g)?'checked':''}><span>${g}</span></label>`).join('')}</div></fieldset><fieldset><legend>Не показывать</legend><div class="chip-checks muted-checks">${GENRES.map(g=>`<label><input type="checkbox" name="avoid" value="${g}" ${(u.avoid||[]).includes(g)?'checked':''}><span>${g}</span></label>`).join('')}</div></fieldset><button class="primary wide">Сохранить</button></form>`,'wide');}
-async function saveProfile(fd){const nickname=String(fd.get('nickname')||'').trim();const firstName=String(fd.get('firstName')||'').trim();const lastName=String(fd.get('lastName')||'').trim();const username=String(fd.get('username')||'').trim().replace(/^@/,'');const preferences=fd.getAll('genres');const avoid=fd.getAll('avoid').filter(x=>!preferences.includes(x));if(isCloudAuthenticated()){try{await updateMyProfile({nickname,first_name:firstName,last_name:lastName,username,wanted_genres:preferences,unwanted_genres:avoid});}catch(err){alert(`Профиль не синхронизирован: ${err.message}`);return;}}update(s=>{Object.assign(s.user,{nickname,name:nickname,firstName,lastName,username,preferences,avoid});s.ui.modal=null;});render();}
+function profileDialog(){openModal(profileEditor(state.user,state.catalogs||{genres:[],topics:[]}), 'wide');}
+async function handleProfileMedia(event,kind){
+  const file=event.target.files?.[0];if(!file)return;const status=document.querySelector('#profileMediaStatus');if(status)status.textContent='Загрузка…';event.target.disabled=true;
+  try{const prepared=await cropProfileImage(file,kind==='banner'?{aspect:3,width:1500,height:500}:{aspect:1,width:512,height:512});const result=await uploadProfileMedia(kind,prepared);update(s=>{if(kind==='banner'){s.user.bannerPath=result.path;s.user.bannerUrl=result.url;}else{s.user.avatarPath=result.path;s.user.avatarUrl=result.url;}},{persist:true});if(status)status.textContent='Изображение сохранено';}
+  catch(error){if(status)status.textContent='Ошибка загрузки';alert(error.message);}finally{event.target.disabled=false;event.target.value='';}
+}
+async function saveProfile(fd){
+  const payload=profilePayload(fd);if(!payload.nickname||!payload.username){alert('Никнейм и username обязательны');return;}
+  let favoriteBooks,socialLinks;try{favoriteBooks=parseRows(fd,'book',['title','authorName','externalUrl']).map(book=>({...book,externalUrl:book.externalUrl?normalizeUrl(book.externalUrl):''}));socialLinks=parseRows(fd,'social',['platform','label','url']).map(link=>({...link,label:link.label||link.platform,url:normalizeUrl(link.url)}));}catch(error){alert(error.message);return;}
+  const preferences=normalizePreferences({wantedGenres:fd.getAll('wantedGenres'),unwantedGenres:fd.getAll('unwantedGenres'),wantedTopics:fd.getAll('wantedTopics'),unwantedTopics:fd.getAll('unwantedTopics')});
+  try{await Promise.all([updateMyProfile(payload),replaceMyProfileDetails({favoriteBooks,socialLinks,preferences})]);const [profile,details]=await Promise.all([getMyProfile(),fetchMyProfileDetails()]);const user=cloudUserFrom(profile,getSession()?.user,state.user);mergeProfileDetails(user,details,state.catalogs);update(s=>{s.user=user;s.ui.modal=null;});render();}
+  catch(error){alert(`Профиль не сохранён: ${error.message}`);}
+}
 
 async function bootstrap(){
   const serverOnline=await checkServerConnection();
@@ -1311,6 +1378,7 @@ async function bootstrap(){
       const profile=await getMyProfile();
       if(profile){
         const user=cloudUserFrom(profile,auth.user,state.user||{});
+        await refreshIdentityData(user);
         update(s=>{s.user=user;s.cloud={...(s.cloud||{}),connected:true,serverOnline:true};},{persist:true});
         await refreshCloudLiterature();await refreshCloudFeed();await refreshCloudChats(false);await refreshNotifications(false);if(user.isAdmin)await refreshAdminData(false);startCloudPolling();
       }else update(s=>s.user=null,{persist:false});

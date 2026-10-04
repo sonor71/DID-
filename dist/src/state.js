@@ -74,6 +74,7 @@ function baseState(){
   return {
     user:null,
     cloud:{serverOnline:false,connected:false,lastSync:null,error:null},
+    catalogs:{genres:[],topics:[]},
     migrations:{},
     works:structuredClone(seedWorks).map(normalizeWork),
     posts:structuredClone(seedPosts),
@@ -104,12 +105,12 @@ function baseState(){
     verificationRequests:[],
     privateNotes:'',
     ui:{
-      page:'home',sidebarOpen:false,profileTab:'posts',selectedWorkId:null,selectedCommunityId:null,selectedStudioWorkId:null,
-      modal:null,toast:null,selectedQuote:'',chatPanelOpen:false,chatTab:'chats',selectedChatId:'dm-elara',evaluationWorkId:null,
+      page:'home',sidebarOpen:false,profileTab:'overview',selectedWorkId:null,selectedCommunityId:null,selectedStudioWorkId:null,
+      modal:null,toast:null,selectedQuote:'',chatPanelOpen:false,chatTab:'chats',selectedChatId:'dm-elara',evaluationWorkId:null,evaluationMode:null,
       evaluationFilters:{genres:[],kinds:[],length:'any'},
       readFilters:{query:'',genre:'',length:''},
       createDraftType:null,bookPageIndex:0,bookViewMode:false,bookSpreadIndex:0,readerBookIndex:0,studioGrid:false,canvasSelectedObjectId:null
-    }
+    },evaluationSession:null,evaluationCatalog:[],authorFeedback:[]
   };
 }
 

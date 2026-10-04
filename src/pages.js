@@ -1,6 +1,8 @@
 import {state, xpToLevel, reviewerRank} from './state.js';
 import {GENRES, FEEDBACK_CATEGORIES, ANNOTATION_TYPES, journalItems, specialists} from './data.js';
 import {esc,stars,pill,cover,progress,empty} from './ui.js';
+import {profileView} from './profile/ProfileView.js';
+import {feedbackView} from './feedback/FeedbackView.js';
 
 const me=()=>state.user;
 const myWorks=()=>state.works.filter(w=>w.authorId===me()?.id);
@@ -52,7 +54,7 @@ function chatDrawer(){
 export function onboarding(){
   return `<main class="onboarding"><section class="onboard-card">
     <div class="brand-lockup"><img src="/assets/home/brand.png" alt="FRAKTUM"><div><h1>FRAKTUM</h1><p>Литературная платформа для авторов и читателей</p></div></div>
-    <div class="step-badge">v0.18 · Free Canvas Book Studio</div>
+    <div class="step-badge">v0.19 · Free Canvas Book Studio</div>
     <h2>Кем вы хотите пользоваться платформой?</h2>
     <p class="muted">Роль можно изменить позже. Автор получает публикацию произведений, полный Book Studio и аналитику.</p>
     <div class="role-grid">
@@ -117,7 +119,7 @@ export function shell(content){
   const serverOnline=!!state.cloud?.serverOnline;
   const nav=[
     ['home','Главная'],['evaluate','Оценить'],['read','Читать'],['library','Библиотека'],
-    [author?'create':'notes',author?'Создать':'Мои заметки'],['specialists','Специалисты'],['communities','Сообщества'],['messages','Сообщения'],
+    [author?'create':'notes',author?'Создать':'Мои заметки'],...(author?[['feedback','Обратная связь']]:[]),['specialists','Специалисты'],['communities','Сообщества'],['messages','Сообщения'],
     ...(u.isAdmin?[['admin','Админ-панель']]:[])
   ];
   const unread=(state.notifications||[]).filter(n=>!n.read_at).length;
@@ -203,12 +205,13 @@ export function getEvaluationCandidates(){
     .filter(w=>f.length==='any'||(f.length==='tiny'?evaluationMinutes(w)<=2:evaluationMinutes(w)>=3));
 }
 export function evaluatePage(){
-  const candidates=getEvaluationCandidates();
-  const f=state.ui.evaluationFilters||{genres:[],kinds:[],length:'any'};
-  const filterSummary=[f.genres?.length?f.genres.join(', '):'все жанры',f.kinds?.length?f.kinds.join(', '):'все типы',f.length==='tiny'?'до 2 мин':f.length==='short'?'3–5 мин':'любая длина'].join(' · ');
-  return shell(`<section class="evaluation-hero"><span class="eyebrow">Быстрая критика</span><h1>Оценить отрывок</h1><p>Здесь вы не читаете книгу целиком. Платформа выдаёт короткий фрагмент произведения, который можно разобрать, отметить спорные места и завершить полноценной рецензией.</p><button class="evaluation-start" data-action="start-evaluation">НАЧАТЬ ОЦЕНИВАТЬ</button><button class="evaluation-filter" data-action="evaluation-filters">ФИЛЬТР</button><small>${esc(filterSummary)} · доступно фрагментов: ${candidates.length}</small></section>`);
+  if(state.ui.evaluationMode==='catalog')return evaluationCatalogPage();
+  return shell(`<section class="evaluation-hero"><span class="eyebrow">Оценка текстов</span><h1>Как вы хотите оценивать?</h1><p>Быстрая сессия фиксирует набор текстов и прогресс. В каталоге вы самостоятельно выбираете произведение.</p><div class="evaluation-mode-grid"><button class="evaluation-mode-card" data-action="evaluation-session-dialog"><b>Быстрая сессия</b><span>3, 5, 10, 20 или своё количество текстов</span></button><button class="evaluation-mode-card" data-action="evaluation-catalog"><b>Каталог</b><span>Фильтры и самостоятельный выбор</span></button></div><button class="evaluation-filter" data-action="evaluation-filters">Настроить фильтры</button></section>`);
 }
+function evaluationCatalogPage(){const items=state.evaluationCatalog||[];return shell(`<div class="page-head"><div><button class="text-btn" data-action="evaluation-mode-home">← Режим оценки</button><h1>Каталог оценки</h1><p>Свежие публичные версии, открытые для обратной связи.</p></div></div><div class="evaluation-catalog">${items.length?items.map(item=>`<article class="card evaluation-catalog-card">${item.cover?`<img src="${esc(item.cover)}" alt="">`:''}<div><span class="eyebrow">~${item.minutes} мин</span><h2>${esc(item.title)}</h2><p>${esc(item.summary||String(item.plainText).slice(0,180))}</p><div>${(item.genres||[]).map(pill).join('')}</div><button class="primary" data-action="evaluation-catalog-open" data-version="${item.versionId}">Оценить</button></div></article>`).join(''):empty('Нет доступных текстов','Измените фильтры или вернитесь позже.')}</div>`);}
+
 export function evaluationSession(){
+  const session=state.evaluationSession;if(session){const item=session.items[session.currentIndex];if(!item)return shell(empty('Сессия завершена','Все тексты оценены.'));const pct=Math.round(session.completedCount/session.targetCount*100);const anns=state.annotations[`${item.workId}:evaluation`]||[];return shell(`<div class="evaluation-head"><button class="text-btn" data-action="navigate" data-page="evaluate">← Выйти</button><div><span class="eyebrow">Сессия · ${session.completedCount+1} / ${session.targetCount}</span><h1>${esc(item.title)}</h1></div></div><div class="session-progress"><span style="width:${pct}%"></span></div><div class="evaluation-layout"><section class="reader-sheet evaluation-sheet"><div class="reader-toolbar"><button data-action="font-down">A−</button><button data-action="font-up">A+</button><button data-action="toggle-reader-theme">Фон</button><button data-action="save-selection" class="accent">Отметить выделение</button></div><article id="readerText" class="reader-text">${String(item.plainText||'').split(/\n\n/).map(text=>`<p>${esc(text)}</p>`).join('')}</article><div class="reader-finish"><span>${anns.length} пометок</span><button class="primary" data-action="evaluation-session-next">${session.completedCount+1>=session.targetCount?'Завершить сессию':'Следующий текст'}</button></div></section></div>`);}
   const candidates=getEvaluationCandidates();
   let w=workById(state.ui.evaluationWorkId);
   if(!w||!candidates.some(x=>x.id===w.id)) w=candidates[0];
@@ -281,7 +284,7 @@ export function createPage(){
   const own=myWorks();
   const selected=state.ui.selectedStudioWorkId==='__new__'?null:(workById(state.ui.selectedStudioWorkId)||own[0]);
   const center=state.ui.selectedStudioWorkId==='__new__'?createWizard():selected?editor(selected):createWelcome();
-  return shell(`<div class="studio-v2"><aside class="studio-projects"><div class="row spread"><div><span class="eyebrow">FRAKTUM Studio</span><h2>Проекты</h2></div><button class="primary small" data-action="new-work">+ Новый</button></div>${own.length?own.map(w=>`<button class="studio-work ${selected?.id===w.id?'active':''}" data-action="studio-select" data-id="${w.id}"><b>${esc(w.title||'Без названия')}</b><small>${w.creationType==='evaluation'?'Отрывок для оценки':w.editorMode==='book'?'Книга':'Документ'} · v${esc(w.version)}</small></button>`).join(''):empty('Нет проектов','Создайте первый текст.')}</aside><section class="studio-main">${center}</section></div>`);
+  return shell(`<div class="studio-v2"><aside class="studio-projects"><div class="row spread"><div><span class="eyebrow">FRAKTUM Studio</span><h2>Проекты</h2></div><button class="primary small" data-action="new-work">+ Новый</button></div>${own.length?own.map(w=>`<button class="studio-work ${selected?.id===w.id?'active':''}" data-action="studio-select" data-id="${w.id}"><b>${esc(w.title||'Без названия')}</b><small>${w.creationType==='fragment'?'Фрагмент':w.editorMode==='book'?'Книга':'Документ'} · v${esc(w.version)}</small></button>`).join(''):empty('Нет проектов','Создайте первый текст.')}</aside><section class="studio-main">${center}</section></div>`);
 }
 
 function createWelcome(){
@@ -290,8 +293,9 @@ function createWelcome(){
 
 function createWizard(){
   const type=state.ui.createDraftType;
-  if(!type) return `<div class="create-wizard"><span class="eyebrow">Шаг 1</span><h1>Что вы хотите создать?</h1><div class="creation-choice-grid"><button class="creation-choice" data-action="set-create-type" data-type="evaluation"><b>Отрывок для оценки</b><span>Короткий текст, который попадёт в раздел «Оценить». Вертикальные листы как в Word.</span></button><button class="creation-choice" data-action="set-create-type" data-type="work"><b>Произведение</b><span>Полноценная книга, рассказ, повесть или другой текст для публикации и чтения.</span></button></div></div>`;
-  if(type==='evaluation') return `<div class="create-wizard"><button class="text-btn" data-action="set-create-type" data-type="">← Назад</button><span class="eyebrow">Отрывок для оценки</span><h1>Документный режим</h1><p>Листы идут вниз, как в обычном текстовом редакторе. После работы отрывок можно сразу отправить читателям на оценку.</p><button class="primary big-action" data-action="start-create-project" data-type="evaluation" data-mode="document">Открыть редактор →</button></div>`;
+  if(!type) return `<div class="create-wizard"><span class="eyebrow">Создать</span><h1>Что вы хотите создать?</h1><div class="creation-choice-grid"><button class="creation-choice" data-action="set-create-type" data-type="work"><b>Произведение</b><span>Книга или рассказ для публикации и чтения.</span></button><button class="creation-choice" data-action="set-create-type" data-type="fragment"><b>Фрагмент</b><span>Публичный отрывок, который можно отправить на оценку.</span></button><button class="creation-choice" data-action="set-create-type" data-type="draft"><b>Черновик</b><span>Приватная работа, видимая только вам.</span></button><button class="creation-choice" data-action="open-post"><b>Пост</b><span>Короткая публикация в социальной ленте.</span></button></div></div>`;
+  if(type==='fragment') return `<div class="create-wizard"><button class="text-btn" data-action="set-create-type" data-type="">← Назад</button><span class="eyebrow">Фрагмент</span><h1>Публичный отрывок</h1><p>После публикации фрагмент появится в каталоге оценки как отдельная сущность.</p><button class="primary big-action" data-action="start-create-project" data-type="fragment" data-mode="document">Открыть редактор →</button></div>`;
+  if(type==='draft') return `<div class="create-wizard"><button class="text-btn" data-action="set-create-type" data-type="">← Назад</button><span class="eyebrow">Черновик</span><h1>Приватный проект</h1><p>Черновик не публикуется и не попадает в открытый каталог.</p><button class="primary big-action" data-action="start-create-project" data-type="draft" data-mode="document">Открыть редактор →</button></div>`;
   return `<div class="create-wizard"><button class="text-btn" data-action="set-create-type" data-type="">← Назад</button><span class="eyebrow">Произведение</span><h1>Выберите режим работы</h1><div class="creation-choice-grid"><button class="creation-choice" data-action="start-create-project" data-type="work" data-mode="document"><b>Документ</b><span>Страницы вертикально прокручиваются вниз. Подходит для быстрого написания и редактирования.</span></button><button class="creation-choice" data-action="start-create-project" data-type="work" data-mode="book"><b>Книга</b><span>Свободные страницы как в настоящем дневнике: текст, фото, фон, слои и произвольная композиция. Готовую книгу можно перелистывать.</span></button></div></div>`;
 }
 
@@ -383,7 +387,7 @@ function mediaPanel(w){
 function editor(w){
   const publication=w.publicationStatus||'draft';
   const evaluation=w.evaluationStatus||'closed';
-  const isFragment=w.creationType==='evaluation';
+  const isFragment=w.creationType==='fragment';
   const isBook=w.editorMode==='book';
   const bookPreview=isBook&&!!state.ui.bookViewMode;
   const pages=w.bookPages||[];
@@ -422,25 +426,8 @@ export function journalPage(){
   return shell(`<div class="page-head"><div><h1>Журнал</h1><p>Интервью с новыми авторами и практические материалы.</p></div></div><div class="journal-grid">${journalItems.map(i=>`<article class="card journal"><span class="eyebrow">${esc(i.type)}</span><h2>${esc(i.title)}</h2><p>${esc(i.summary)}</p><small>${esc(i.author)}</small><button>Читать →</button></article>`).join('')}</div>`);
 }
 
-export function profilePage(){
-  const u=me(); const author=u.role==='author';
-  const tabs=[['posts','Посты'],...(author?[['written','Написанные']]:[]),['read','Прочитанные'],['reviews','Рецензии'],['later','Читать позже'],['communities','Сообщества']];
-  return shell(`<section class="profile-head"><div class="profile-avatar">${esc((u.nickname||u.name||'?')[0].toUpperCase())}</div><div><h1>${esc(u.nickname||u.name)} ${u.verified?'<span class="verified">✓</span>':''}${u.isAdmin?'<span class="admin-badge">ADMIN</span>':''}</h1><p>@${esc(u.username)} · ${author?'Автор':'Читатель'}${u.firstName||u.lastName?` · ${esc([u.firstName,u.lastName].filter(Boolean).join(' '))}`:''}</p><div class="stats-row"><div><b>${xpToLevel(u.xp)}</b><small>уровень</small></div><div><b>${u.xp}</b><small>XP</small></div><div><b>${u.reputation}</b><small>${reviewerRank(u.reputation)}</small></div></div></div><button data-action="edit-profile">Редактировать профиль</button></section><div class="tabs">${tabs.map(([id,label])=>`<button data-action="profile-tab" data-tab="${id}" class="${state.ui.profileTab===id?'active':''}">${label}</button>`).join('')}</div><section class="profile-content">${profileTabContent(state.ui.profileTab)}</section>`);
-}
-
-function profileTabContent(tab){
-  const u=me();
-  if(tab==='posts') return state.posts.filter(p=>p.author===u.name).length?state.posts.filter(p=>p.author===u.name).map(p=>`<article class="card"><p>${esc(p.text)}</p></article>`).join(''):empty('Пока нет постов','Создайте первый пост с главной страницы.');
-  if(tab==='written') return myWorks().length?myWorks().map(w=>`<article class="profile-work card">${cover(w)}<div><h3>${esc(w.title)}</h3><p>v${esc(w.version)} · ${w.publicationStatus==='published'?'опубликовано':'черновик'} · ${w.evaluationStatus==='open'?'оценка открыта':'оценка закрыта'} · ${reviewsFor(w.id,w.version).length} рецензий</p><div class="actions"><button data-action="studio-select" data-id="${w.id}">Редактировать</button><button class="primary" data-action="analytics" data-id="${w.id}">Аналитика</button></div></div></article>`).join(''):empty('Нет написанных произведений','Создайте первый проект в Book Studio.');
-  if(tab==='read') return state.library.completed.length?state.library.completed.map(id=>{const w=workById(id);return `<article class="profile-work card">${cover(w)}<div><h3>${esc(w.title)}</h3><p>${esc(w.author)}</p><button data-action="open-work" data-id="${id}">Открыть</button></div></article>`}).join(''):empty('Нет прочитанных','Завершённые произведения появятся здесь.');
-  if(tab==='later') return state.library.later.length?state.library.later.map(id=>{const w=workById(id);return `<article class="profile-work card">${cover(w)}<div><h3>${esc(w.title)}</h3><p>${esc(w.author)}</p><button data-action="open-work" data-id="${id}">Читать</button></div></article>`}).join(''):empty('Список пуст','Добавляйте произведения через «Читать позже».');
-  if(tab==='communities') return state.joinedCommunities.length?state.joinedCommunities.map(id=>{const c=state.communities.find(x=>x.id===id);return `<article class="card"><h3>${esc(c.name)}</h3><button data-action="open-community" data-id="${id}">Открыть</button></article>`}).join(''):empty('Нет сообществ','Вступите в интересное сообщество.');
-  if(tab==='reviews'){
-    const rs=state.reviews.filter(r=>r.authorId===u.id);
-    return rs.length?rs.map(reviewCard).join(''):empty('Нет рецензий','После полной оценки произведения рецензия появится здесь.');
-  }
-  return '';
-}
+export function profilePage(){ return shell(profileView()); }
+export function feedbackPage(){ return shell(feedbackView()); }
 
 export function adminPage(){
   const u=me();
