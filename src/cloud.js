@@ -100,12 +100,49 @@ export async function updateMyProfile(patch){
   const rows=await rest(`lit_profiles?id=eq.${session.user.id}`,{method:'PATCH',body:patch,headers:{Prefer:'return=representation'}});return rows?.[0]||null;
 }
 
+export async function fetchDiscoveryCatalogs(){
+  const [genres,topics]=await Promise.all([
+    rest('lit_genres?active=eq.true&select=id,slug,name,parent_id,sort_order&order=sort_order.asc&limit=200'),
+    rest('lit_topics?active=eq.true&select=id,slug,name,group_name,sort_order&order=group_name.asc,sort_order.asc&limit=300')
+  ]);return {genres:genres||[],topics:topics||[]};
+}
+export async function fetchMyProfileDetails(){
+  await ensureSession();const me=session?.user?.id;if(!me)return {favoriteBooks:[],socialLinks:[],genrePreferences:[],topicPreferences:[],followers:0,following:0};
+  await rpc('lit_evaluate_my_achievements').catch(()=>null);
+  const [favoriteBooks,socialLinks,genrePreferences,topicPreferences,followers,following,achievementProgress,achievements]=await Promise.all([
+    rest(`lit_profile_favorite_books?user_id=eq.${me}&select=id,title,author_name,cover_path,external_url,sort_order&order=sort_order.asc&limit=50`),
+    rest(`lit_profile_social_links?user_id=eq.${me}&select=id,platform,label,url,sort_order&order=sort_order.asc&limit=50`),
+    rest(`lit_profile_genre_preferences?user_id=eq.${me}&select=genre_id,preference&limit=300`),rest(`lit_profile_topic_preferences?user_id=eq.${me}&select=topic_id,preference&limit=300`),
+    rest(`lit_follows?following_id=eq.${me}&select=follower_id&limit=1000`),rest(`lit_follows?follower_id=eq.${me}&select=following_id&limit=1000`),
+    rest(`lit_user_achievements?user_id=eq.${me}&select=achievement_id,earned_at,progress,showcase_order&limit=100`),rest('lit_achievements?active=eq.true&select=id,slug,name,description,category,icon,rarity,condition_value&limit=100')
+  ]);
+  const progressMap=Object.fromEntries((achievementProgress||[]).map(row=>[row.achievement_id,row]));const userAchievements=(achievements||[]).map(item=>({...item,...(progressMap[item.id]||{progress:0,earned_at:null})}));
+  return {favoriteBooks:favoriteBooks||[],socialLinks:socialLinks||[],genrePreferences:genrePreferences||[],topicPreferences:topicPreferences||[],followers:followers?.length||0,following:following?.length||0,achievements:userAchievements};
+}
+export async function replaceMyProfileDetails({favoriteBooks=[],socialLinks=[],preferences}){
+  return rpc('lit_replace_my_profile_details',{p_books:favoriteBooks,p_links:socialLinks,p_wanted_genres:preferences.wantedGenres,p_unwanted_genres:preferences.unwantedGenres,p_wanted_topics:preferences.wantedTopics,p_unwanted_topics:preferences.unwantedTopics});
+}
+
+export async function uploadProfileMedia(kind,file){
+  await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Войдите в аккаунт');
+  const bucket=kind==='banner'?'lit-profile-banners':'lit-avatars',path=`${me}/${kind}.webp`;
+  const res=await fetch(`${SUPABASE_URL}/storage/v1/object/${bucket}/${path}`,{method:'POST',headers:{apikey:SUPABASE_KEY,Authorization:`Bearer ${session.access_token}`,'Content-Type':file.type,'x-upsert':'true'},body:file});await parse(res);
+  const column=kind==='banner'?'banner_path':'avatar_path';await updateMyProfile({[column]:path});return {path,url:publicObjectUrl(bucket,path)};
+}
+
 const inFilter=ids=>ids.map(x=>`\"${String(x).replaceAll('"','')}\"`).join(',');
 export function publicObjectUrl(bucket,path){return `${SUPABASE_URL}/storage/v1/object/public/${bucket}/${String(path).split('/').map(encodeURIComponent).join('/')}`;}
 export async function uploadPublicMedia(bucket,path,file){
   await ensureSession(); if(!session?.access_token)throw new Error('Войдите в аккаунт');
   const res=await fetch(`${SUPABASE_URL}/storage/v1/object/${bucket}/${path.split('/').map(encodeURIComponent).join('/')}`,{method:'POST',headers:{apikey:SUPABASE_KEY,Authorization:`Bearer ${session.access_token}`,'Content-Type':file.type||'application/octet-stream','x-upsert':'false'},body:file});
   await parse(res);return publicObjectUrl(bucket,path);
+}
+
+export async function uploadWorkAsset(path,file){
+  await ensureSession();if(!session?.user?.id)throw new Error('Войдите в аккаунт');
+  if(!String(path).startsWith(`${session.user.id}/`))path=`${session.user.id}/${path}`;
+  const url=await uploadPublicMedia('lit-work-assets',path,file);
+  return {storagePath:path,url};
 }
 
 export async function fetchPublicFeed(){
@@ -325,6 +362,38 @@ export async function saveCloudReadingProgress(work,{progress=0,status='reading'
   await ensureSession();const me=session?.user?.id;if(!me||!work?.cloudId)return;
   const row={user_id:me,work_id:work.cloudId,version_id:work.cloudVersionId||null,status,progress:Math.max(0,Math.min(100,Number(progress)||0)),last_position:0,updated_at:new Date().toISOString()};
   return rest('lit_reading_progress?on_conflict=user_id,work_id',{method:'POST',body:row,headers:{Prefer:'resolution=merge-duplicates,return=minimal'}});
+}
+
+export async function createEvaluationSession(targetCount){
+  const rows=await rpc('lit_create_evaluation_session',{p_target_count:targetCount});
+  if(!rows?.length)throw new Error('Сессия не содержит текстов');
+  return {id:rows[0].session_id,items:rows.map(row=>({position:row.item_id,workId:`cloud:${row.work_id}`,cloudWorkId:row.work_id,versionId:row.version_id,title:row.title,plainText:row.plain_text,status:'pending'}))};
+}
+export async function completeEvaluationItem(sessionId,position){return rpc('lit_complete_evaluation_item',{p_session:sessionId,p_position:position});}
+export async function fetchEvaluationCatalog({limit=24,offset=0}={}){
+  const pageSize=Math.min(50,Number(limit)||24),start=Math.max(0,Number(offset)||0);
+  const [versions,fragments]=await Promise.all([rest(`lit_work_versions?evaluation_open=eq.true&select=id,work_id,title,plain_text,created_at&order=created_at.desc&limit=${pageSize}&offset=${start}`),rest(`lit_fragments?visibility=eq.public&evaluation_open=eq.true&select=id,work_id,version_id,title,plain_text,published_at&order=published_at.desc&limit=${pageSize}&offset=${start}`)]);
+  if(!versions?.length&&!fragments?.length)return [];
+  const ids=[...new Set((versions||[]).map(version=>version.work_id))],works=await rest(`lit_works?id=in.(${inFilter(ids)})&select=id,author_id,title,summary,genres,topics,cover_path&limit=50`),workMap=Object.fromEntries((works||[]).map(work=>[work.id,work]));
+  const workItems=(versions||[]).map(version=>{const work=workMap[version.work_id]||{};return {versionId:version.id,cloudWorkId:version.work_id,workId:`cloud:${version.work_id}`,title:work.title||version.title,summary:work.summary||'',genres:work.genres||[],topics:work.topics||[],cover:work.cover_path||'',plainText:version.plain_text||'',minutes:Math.max(1,Math.ceil(String(version.plain_text||'').length/900)),createdAt:version.created_at};});
+  const fragmentItems=(fragments||[]).map(fragment=>({fragmentId:fragment.id,versionId:fragment.version_id||`fragment:${fragment.id}`,cloudWorkId:fragment.work_id,workId:fragment.work_id?`cloud:${fragment.work_id}`:`fragment:${fragment.id}`,title:fragment.title,summary:'Фрагмент',genres:[],topics:[],cover:'',plainText:fragment.plain_text||'',minutes:Math.max(1,Math.ceil(String(fragment.plain_text||'').length/900)),createdAt:fragment.published_at}));
+  return [...fragmentItems,...workItems].sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,pageSize);
+}
+export async function saveCloudFragment(local,{publish=true}={}){
+  await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Войдите в аккаунт');
+  const payload={author_id:me,work_id:local.cloudId||null,version_id:local.cloudVersionId||null,title:local.title||'Без названия',content:{type:'doc',content:[{type:'paragraph',text:local.content||''}]},plain_text:local.content||'',visibility:publish?'public':'private',evaluation_open:publish,updated_at:new Date().toISOString(),...(publish?{published_at:local.publishedAt||new Date().toISOString()}:{})};
+  if(local.fragmentCloudId){const rows=await rest(`lit_fragments?id=eq.${local.fragmentCloudId}&author_id=eq.${me}`,{method:'PATCH',body:payload,headers:{Prefer:'return=representation'}});return rows?.[0];}
+  const rows=await rest('lit_fragments',{method:'POST',body:payload,headers:{Prefer:'return=representation'}});return rows?.[0];
+}
+export async function createCloudAnnotation(annotation){
+  await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Войдите в аккаунт');
+  const rows=await rest('lit_review_annotations',{method:'POST',body:{reviewer_id:me,work_id:annotation.workId||null,version_id:annotation.versionId||null,fragment_id:annotation.fragmentId||null,annotation_type:annotation.type,block_id:annotation.blockId||null,start_offset:annotation.startOffset,end_offset:annotation.endOffset,selected_text:annotation.selectedText,prefix_text:annotation.prefixText||null,suffix_text:annotation.suffixText||null,body:annotation.body||''},headers:{Prefer:'return=representation'}});return rows?.[0];
+}
+export async function deleteCloudAnnotation(id){return rest(`lit_review_annotations?id=eq.${encodeURIComponent(id)}`,{method:'DELETE'});}
+export async function fetchAuthorFeedback(){
+  await ensureSession();const me=session?.user?.id;if(!me)return [];
+  const works=await rest(`lit_works?author_id=eq.${me}&select=id&limit=200`);if(!works?.length)return [];
+  return rest(`lit_review_annotations?work_id=in.(${inFilter(works.map(work=>work.id))})&select=id,reviewer_id,work_id,version_id,fragment_id,annotation_type,selected_text,body,created_at&order=created_at.desc&limit=200`);
 }
 
 // ---- Real user search, conversations and messages ----

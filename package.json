@@ -1,1 +1,15 @@
-{"name":"fraktum-literature","private":true,"version":"0.17.0","type":"module","scripts":{"dev":"node server.mjs","preview":"node server.mjs","build":"node build.mjs"}}
+{
+  "name": "fraktum-literature",
+  "private": true,
+  "version": "0.19.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "preview": "node server.mjs",
+    "build": "node build.mjs",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test tests/unit/*.test.js",
+    "test:e2e": "node --test tests/e2e/*.test.js"
+  }
+}

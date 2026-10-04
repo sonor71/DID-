@@ -1,15 +1,6 @@
 export const GENRES = ['Фэнтези','Хоррор','Детектив','Романтика','Фантастика','Драма','Приключения','Мистика','Поэзия'];
 export const FEEDBACK_CATEGORIES = ['Сюжет','Персонажи','Стиль','Атмосфера','Темп'];
-export const ANNOTATION_TYPES = [
-  ['unclear','Непонятно'],
-  ['wording','Неудачная формулировка'],
-  ['error','Возможная ошибка'],
-  ['character','Персонаж ведёт себя странно'],
-  ['pace','Провисает темп'],
-  ['improve','Можно улучшить'],
-  ['debate','Спорный момент'],
-  ['love','Очень понравилось']
-];
+export const ANNOTATION_TYPES = [['unclear','? Непонятно'],['strange','⚠ Странно'],['disputed','≠ Спорно'],['comment','💬 Комментарий']];
 
 export const seedPeople = [
   {id:'p-elara',name:'Elara Vance',username:'elara',role:'Автор',online:true},
