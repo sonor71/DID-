@@ -159,7 +159,7 @@ document.addEventListener('touchstart', prime, { capture: true, passive: true })
 document.addEventListener('keydown', prime, { capture: true });
 
 function showNotificationOptIn() {
-  if (notificationPromptShown || !('Notification' in window) || Notification.permission !== 'default') return;
+  if (notificationPromptShown || !('Notification' in window) || window.Notification.permission !== 'default') return;
   if (document.querySelector('#fraktumCallNotificationOptIn')) return;
   notificationPromptShown = true;
 
@@ -175,16 +175,16 @@ function showNotificationOptIn() {
   document.body.appendChild(box);
   box.querySelector('#fraktumCallNotifyLater')?.addEventListener('click', () => box.remove());
   box.querySelector('#fraktumCallNotifyEnable')?.addEventListener('click', async () => {
-    try { await Notification.requestPermission(); } catch {}
+    try { await window.Notification.requestPermission(); } catch {}
     await unlockAudio();
     box.remove();
   });
 }
 
 function notifyIncomingCall({ id, caller, mode }) {
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  if (!('Notification' in window) || window.Notification.permission !== 'granted') return;
   try {
-    const n = new Notification(mode === 'video' ? 'Входящий видеозвонок · FRAKTUM' : 'Входящий звонок · FRAKTUM', {
+    const n = new window.Notification(mode === 'video' ? 'Входящий видеозвонок · FRAKTUM' : 'Входящий звонок · FRAKTUM', {
       body: `${caller} звонит вам`,
       icon: '/assets/home/brand.png',
       badge: '/assets/home/brand.png',
@@ -272,7 +272,7 @@ document.addEventListener('click', async (event) => {
   }
 }, true);
 
-const observer = new MutationObserver(scanCallUi);
+const observer = new window.MutationObserver(scanCallUi);
 observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
 setInterval(scanCallUi, 400);
 
