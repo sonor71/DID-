@@ -39,6 +39,57 @@ export async function ensureSession(){
 export function getSession(){return session;}
 export function isCloudAuthenticated(){return !!session?.access_token;}
 
+export async function openFraktumGame(){
+  await ensureSession();
+
+  const gameUrl=String(config.gameUrl||'https://fraktum-tcg-main.vercel.app').replace(/\/$/,'');
+  let gameOrigin='';
+  try{gameOrigin=new URL(gameUrl).origin;}catch{throw new Error('Некорректный адрес FRAKTUM TCG');}
+
+  let popup=null;
+  let cleanupTimer=null;
+
+  const cleanup=()=>{
+    window.removeEventListener('message',handleGameAuthRequest);
+    if(cleanupTimer)clearTimeout(cleanupTimer);
+  };
+
+  const handleGameAuthRequest=event=>{
+    if(!popup||event.source!==popup||event.origin!==gameOrigin)return;
+    if(event.data?.type!=='fraktum:auth-request')return;
+    if(!session?.access_token||!session?.refresh_token)return;
+
+    let projectRef='';
+    try{projectRef=new URL(SUPABASE_URL).hostname.split('.')[0]||'';}catch{}
+    if(event.data?.projectRef&&projectRef&&event.data.projectRef!==projectRef)return;
+
+    popup.postMessage({
+      type:'fraktum:auth-session',
+      projectRef,
+      session:{
+        access_token:session.access_token,
+        refresh_token:session.refresh_token,
+        expires_at:session.expires_at||null,
+        token_type:session.token_type||'bearer',
+        user:session.user||null
+      }
+    },gameOrigin);
+
+    cleanupTimer=setTimeout(cleanup,1800);
+  };
+
+  window.addEventListener('message',handleGameAuthRequest);
+  popup=window.open(gameUrl,'fraktum-tcg');
+
+  if(!popup){
+    cleanup();
+    throw new Error('Браузер заблокировал открытие FRAKTUM TCG. Разреши всплывающие окна для сайта.');
+  }
+
+  cleanupTimer=setTimeout(cleanup,12000);
+  return popup;
+}
+
 export async function signOut(){
   if(session?.access_token){await fetch(`${SUPABASE_URL}/auth/v1/logout`,{method:'POST',headers:authHeaders(false)}).catch(()=>{});}saveSession(null);
 }
