@@ -1,0 +1,2 @@
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';
+test('achievement awards have no client write policy and use derived server counts',()=>{const sql=fs.readFileSync('supabase/migrations/202610040004_achievements.sql','utf8');assert.match(sql,/lit_evaluate_my_achievements/);assert.match(sql,/select count\(\*\) from lit_reviews/);assert.doesNotMatch(sql,/create policy .*lit_user_achievements for (insert|all)/i);assert.match(sql,/showcase_order integer check\(showcase_order between 1 and 5\)/);});
