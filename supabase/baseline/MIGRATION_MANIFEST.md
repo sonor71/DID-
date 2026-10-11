@@ -8,3 +8,4 @@ The canonical in-repository history currently starts at the additive v0.19 bound
 - 202610040004 achievements
 - 202610110001 taxonomy v2
 - 202610110002 RPC security hardening
+- 202610110003 taxonomy v2 production reconciliation (idempotent repair for projects where the v2 relations are absent)

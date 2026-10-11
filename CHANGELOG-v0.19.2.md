@@ -8,3 +8,4 @@
 - The browser has a single Supabase configuration source: `/runtime-config.js`, loaded before the application module.
 - OTP requests go directly to Supabase Auth with the configured publishable key and now expose useful, sanitized Supabase error messages.
 - Runtime diagnostics report whether the URL and publishable key are configured without printing their values.
+- Added an additive Taxonomy v2 production reconciliation migration with prerequisite type checks, explicit grants/RLS, indexes, idempotent seed data, RPC grants, legacy genre backfill, and a PostgREST schema-cache reload.
