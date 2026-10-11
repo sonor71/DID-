@@ -15,16 +15,19 @@ function authHeaders(json=true){
   if(json)h['Content-Type']='application/json';
   return h;
 }
-async function parse(res){
+async function parse(res,service='Supabase API'){
   const text=await res.text();let data=null;
   try{data=text?JSON.parse(text):null;}catch{data=text;}
-  if(!res.ok)throw new Error(data?.msg||data?.message||data?.error_description||data?.error||`HTTP ${res.status}`);
+  if(!res.ok){
+    const details=[data?.msg,data?.message,data?.error_description,data?.error,typeof data==='string'?data:null].find(value=>typeof value==='string'&&value.trim());
+    throw new Error(`${service} ${res.status}${details?`: ${details.trim()}`:''}`);
+  }
   return data;
 }
 async function refreshSession(){
   if(!session?.refresh_token)return null;
   const res=await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`,{method:'POST',headers:{apikey:SUPABASE_KEY,'Content-Type':'application/json'},body:JSON.stringify({refresh_token:session.refresh_token})});
-  const data=await parse(res);return saveSession({...data,expires_at:Math.floor(Date.now()/1000)+(data.expires_in||3600)});
+  const data=await parse(res,'Supabase Auth');return saveSession({...data,expires_at:Math.floor(Date.now()/1000)+(data.expires_in||3600)});
 }
 export async function ensureSession(){
   if(!session)return null;
@@ -46,14 +49,14 @@ export async function requestOtp({method,identifier,createUser=false,metadata={}
   if(createUser&&metadata&&Object.keys(metadata).length)body.data=metadata;
   if(method==='phone')body.channel='sms';
   const res=await fetch(`${SUPABASE_URL}/auth/v1/otp`,{method:'POST',headers:{apikey:SUPABASE_KEY,'Content-Type':'application/json'},body:JSON.stringify(body)});
-  return parse(res);
+  return parse(res,'Supabase Auth');
 }
 
 export async function verifyOtp({method,identifier,token}){
   const body={type:method==='phone'?'sms':'email',token:String(token||'').trim()};
   if(method==='phone')body.phone=identifier;else body.email=identifier;
   const res=await fetch(`${SUPABASE_URL}/auth/v1/verify`,{method:'POST',headers:{apikey:SUPABASE_KEY,'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const data=await parse(res);
+  const data=await parse(res,'Supabase Auth');
   if(data?.access_token)saveSession({...data,expires_at:Math.floor(Date.now()/1000)+(data.expires_in||3600)});
   return data;
 }

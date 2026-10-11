@@ -1,8 +1,14 @@
-const runtime=globalThis.__FRAKTUM_CONFIG__||{};
-const fromMeta=import.meta.env||{};
+const runtime=globalThis.__FRAKTUM_CONFIG__;
+if(!runtime||typeof runtime!=='object')throw new Error('[FRAKTUM] runtime-config.js was not loaded before the application');
+const supabaseUrl=String(runtime.VITE_SUPABASE_URL||'').trim().replace(/\/$/,'');
+const supabasePublishableKey=String(runtime.VITE_SUPABASE_PUBLISHABLE_KEY||'').trim();
+if(!supabaseUrl)throw new Error('[FRAKTUM] Missing runtime configuration: VITE_SUPABASE_URL');
+if(!supabasePublishableKey)throw new Error('[FRAKTUM] Missing runtime configuration: VITE_SUPABASE_PUBLISHABLE_KEY');
+console.info('[FRAKTUM] Supabase URL configured:',Boolean(supabaseUrl));
+console.info('[FRAKTUM] Supabase publishable key configured:',Boolean(supabasePublishableKey));
 export const config=Object.freeze({
-  supabaseUrl:String(runtime.VITE_SUPABASE_URL||fromMeta.VITE_SUPABASE_URL||'').replace(/\/$/,''),
-  supabasePublishableKey:String(runtime.VITE_SUPABASE_PUBLISHABLE_KEY||fromMeta.VITE_SUPABASE_PUBLISHABLE_KEY||''),
-  pushPublicKey:String(runtime.VITE_PUSH_PUBLIC_KEY||fromMeta.VITE_PUSH_PUBLIC_KEY||''),
-  demoEnabled:String(runtime.VITE_ENABLE_DEMO_DATA||fromMeta.VITE_ENABLE_DEMO_DATA||'false')==='true'
+  supabaseUrl,
+  supabasePublishableKey,
+  pushPublicKey:String(runtime.VITE_PUSH_PUBLIC_KEY||'').trim(),
+  demoEnabled:String(runtime.VITE_ENABLE_DEMO_DATA||'false').toLowerCase()==='true'
 });
