@@ -40,8 +40,6 @@ export function getSession(){return session;}
 export function isCloudAuthenticated(){return !!session?.access_token;}
 
 export async function openFraktumGame(){
-  await ensureSession();
-
   const gameUrl=String(config.gameUrl||'https://fraktum-tcg-main.vercel.app').replace(/\/$/,'');
   let gameOrigin='';
   try{gameOrigin=new URL(gameUrl).origin;}catch{throw new Error('Некорректный адрес FRAKTUM TCG');}
@@ -54,9 +52,11 @@ export async function openFraktumGame(){
     if(cleanupTimer)clearTimeout(cleanupTimer);
   };
 
-  const handleGameAuthRequest=event=>{
+  const handleGameAuthRequest=async event=>{
     if(!popup||event.source!==popup||event.origin!==gameOrigin)return;
     if(event.data?.type!=='fraktum:auth-request')return;
+
+    await ensureSession().catch(()=>null);
     if(!session?.access_token||!session?.refresh_token)return;
 
     let projectRef='';
@@ -79,6 +79,9 @@ export async function openFraktumGame(){
   };
 
   window.addEventListener('message',handleGameAuthRequest);
+
+  // Open immediately inside the click gesture so Safari/Chrome do not treat it
+  // as an async popup and block it.
   popup=window.open(gameUrl,'fraktum-tcg');
 
   if(!popup){
@@ -86,6 +89,7 @@ export async function openFraktumGame(){
     throw new Error('Браузер заблокировал открытие FRAKTUM TCG. Разреши всплывающие окна для сайта.');
   }
 
+  void ensureSession().catch(()=>null);
   cleanupTimer=setTimeout(cleanup,12000);
   return popup;
 }
