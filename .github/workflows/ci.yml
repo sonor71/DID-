@@ -18,6 +18,7 @@ jobs:
       - run: npm install --no-save eslint@10 typescript@6
       - run: npm run lint
       - run: npm run typecheck
+      - run: npm run schema:audit
       - run: npm run test
       - run: npm run build
         env:

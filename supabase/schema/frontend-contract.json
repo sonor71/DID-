@@ -1,0 +1,21 @@
+{
+  "baselineTables": [
+    "lit_author_verification_requests", "lit_call_signals", "lit_calls", "lit_comment_reactions", "lit_comments",
+    "lit_conversation_members", "lit_conversations", "lit_messages", "lit_notifications", "lit_post_media",
+    "lit_post_reactions", "lit_posts", "lit_profiles", "lit_reading_progress", "lit_reports", "lit_review_reactions", "lit_reviews",
+    "lit_work_versions", "lit_works"
+  ],
+  "managedTables": [
+    "lit_achievements", "lit_audience_segments", "lit_evaluation_preferences", "lit_evaluation_session_items",
+    "lit_evaluation_sessions", "lit_follows", "lit_fragments", "lit_genres", "lit_profile_audience_preferences",
+    "lit_profile_favorite_books", "lit_profile_format_preferences", "lit_profile_genre_preferences",
+    "lit_profile_social_links", "lit_profile_tag_preferences", "lit_profile_topic_preferences",
+    "lit_review_annotations", "lit_tags", "lit_topics", "lit_user_achievements", "lit_work_audiences",
+    "lit_work_external_links", "lit_work_formats", "lit_work_genres", "lit_work_tags"
+  ],
+  "rpcs": [
+    "lit_complete_evaluation_item", "lit_create_evaluation_session", "lit_evaluate_my_achievements",
+    "lit_get_or_create_direct_conversation", "lit_replace_my_profile_details",
+    "lit_replace_my_taxonomy_v2_preferences", "lit_replace_work_taxonomy", "lit_resolve_author_verification"
+  ]
+}
