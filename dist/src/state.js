@@ -1,5 +1,3 @@
-import {seedWorks, seedPosts, seedPostComments, seedCommunities, seedPeople} from './data.js';
-
 const KEY='d20-platform-v4';
 
 function textToHtml(text){
@@ -74,28 +72,21 @@ function baseState(){
   return {
     user:null,
     cloud:{serverOnline:false,connected:false,lastSync:null,error:null},
-    catalogs:{genres:[],topics:[]},
+    catalogs:{genres:[],topics:[],formats:[],audiences:[],tags:[]},
     migrations:{},
-    works:structuredClone(seedWorks).map(normalizeWork),
-    posts:structuredClone(seedPosts),
-    postComments:structuredClone(seedPostComments),
-    reviews:[
-      {id:'r-seed1',workId:'w-artificial',version:'1.0',scope:'evaluation',authorId:'seed-reader',author:'Анонимный читатель',anonymous:true,rating:4,comment:'Атмосфера работает отлично, но переход к дому номер семь кажется слишком резким. Хотелось бы чуть больше внутренней мотивации героя.',categories:{Сюжет:4,Персонажи:3,Стиль:4,Атмосфера:5,Темп:3},annotations:[{type:'pace',label:'Провисает темп',quote:'Ещё утром он поклялся себе никогда сюда не возвращаться.',comment:'Нужна связка с предыдущим решением.'}],reactions:{helpful:7,disagree:2,unhelpful:0},createdAt:'2026-09-12'},
-      {id:'r-seed2',workId:'w-artificial',version:'1.0',scope:'evaluation',authorId:'seed-reader2',author:'MiraK',anonymous:false,rating:5,comment:'Очень понравились часы в финале фрагмента. Это хороший крючок. Я бы не объяснял их сразу.',categories:{Сюжет:5,Персонажи:4,Стиль:5,Атмосфера:5,Темп:4},annotations:[{type:'love',label:'Очень понравилось',quote:'Стрелки двигались назад.',comment:'Сильный финальный образ.'}],reactions:{helpful:11,disagree:1,unhelpful:0},createdAt:'2026-09-13'}
-    ],
+    works:[],
+    posts:[],
+    postComments:[],
+    reviews:[],
     library:{later:[],reading:[],completed:[]},
     readingProgress:{},
     annotations:{},
-    communities:structuredClone(seedCommunities),
+    communities:[],
     joinedCommunities:[],
-    messages:[{id:'m1',from:'Mara Chen',text:'Я загрузила первый вариант иллюстрации.',time:'12:27'},{id:'m2',from:'Elara Vance',text:'Посмотрите, пожалуйста, ритм второй сцены.',time:'14:10'}],
-    peopleDirectory:structuredClone(seedPeople),
-    friends:['p-elara','p-mara','p-kai'],
-    chatThreads:[
-      {id:'dm-elara',type:'dm',title:'Elara Vance',memberIds:['p-elara'],messages:[{id:'dm1',from:'Elara Vance',text:'Если дочитаешь главу — скажи, как тебе темп второй сцены.',time:'18:12'}]},
-      {id:'dm-mara',type:'dm',title:'Mara Chen',memberIds:['p-mara'],messages:[{id:'dm2',from:'Mara Chen',text:'Скину новый эскиз обложки вечером.',time:'17:48'}]},
-      {id:'grp-artificial',type:'group',title:'Искусственная судьба — команда',memberIds:['p-mara','p-james','p-kai'],ownerRole:'author',messages:[{id:'g1',from:'Mara Chen',text:'Я загрузила первый вариант иллюстрации.',time:'12:27'},{id:'g2',from:'James Ellington',text:'Отметил два места по ритму первой главы.',time:'14:10'}]}
-    ],
+    messages:[],
+    peopleDirectory:[],
+    friends:[],
+    chatThreads:[],
     callHistory:[],
     activeCall:null,
     notifications:[
@@ -120,16 +111,14 @@ export function loadState(){
     if(!raw) return baseState();
     const saved=JSON.parse(raw);
     const base=baseState();
-    const posts=Array.isArray(saved.posts)?structuredClone(saved.posts):[];
-    for(const seed of seedPosts) if(!posts.some(p=>p.id===seed.id)) posts.push(structuredClone(seed));
-    const postComments=Array.isArray(saved.postComments)?structuredClone(saved.postComments):[];
-    for(const c of postComments) if(c.myReaction===undefined)c.myReaction=null;
-    for(const seed of seedPostComments){
-      const existing=postComments.find(c=>c.id===seed.id);
-      if(!existing)postComments.push(structuredClone(seed));
-      else if(!saved.migrations?.singleReactionV12){existing.reactions=structuredClone(seed.reactions);existing.myReaction=null;}
-    }
-    const works=(Array.isArray(saved.works)?saved.works:base.works).map(normalizeWork);
+    const seedWorkIds=new Set(['w-artificial','w-horizon','w-river','w-clock','w-snow']);
+    const works=(Array.isArray(saved.works)?saved.works:[]).filter(work=>!seedWorkIds.has(work.id)).map(normalizeWork);
+    const posts=(Array.isArray(saved.posts)?saved.posts:[]).filter(post=>post.cloud);
+    const postComments=(Array.isArray(saved.postComments)?saved.postComments:[]).filter(comment=>comment.cloud);
+    const seedCommunityIds=new Set(['c1','c2','c3','c4']);
+    saved.communities=(saved.communities||[]).filter(item=>!seedCommunityIds.has(item.id));
+    saved.reviews=(saved.reviews||[]).filter(review=>!String(review.id).startsWith('r-seed'));
+    saved.peopleDirectory=[];saved.friends=[];saved.chatThreads=[];saved.messages=[];
     return {
       ...base,
       ...saved,

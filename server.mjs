@@ -6,7 +6,12 @@ const root=path.dirname(fileURLToPath(import.meta.url));
 const port=Number(process.env.PORT||5173);
 const types={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.svg':'image/svg+xml','.json':'application/json'};
 http.createServer((req,res)=>{
+  res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','strict-origin-when-cross-origin');res.setHeader('Permissions-Policy','camera=(self), microphone=(self), geolocation=()');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: blob:; media-src 'self' https: blob:; connect-src 'self' https: wss:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
   const url=new URL(req.url||'/',`http://${req.headers.host}`);
+  if(url.pathname==='/runtime-config.js'){
+    const keys=['VITE_SUPABASE_URL','VITE_SUPABASE_PUBLISHABLE_KEY','VITE_PUSH_PUBLIC_KEY','VITE_ENABLE_DEMO_DATA'];
+    const config=Object.fromEntries(keys.map(key=>[key,process.env[key]||'']));res.setHeader('Content-Type','text/javascript; charset=utf-8');res.end(`globalThis.__FRAKTUM_CONFIG__=${JSON.stringify(config)};`);return;
+  }
   let rel=decodeURIComponent(url.pathname);
   if(rel==='/') rel='/index.html';
   const publicCandidate=path.join(root,'public',rel);

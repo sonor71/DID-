@@ -10,6 +10,8 @@
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test tests/unit/*.test.js",
-    "test:e2e": "node --test tests/e2e/*.test.js"
+    "test:e2e": "node --test tests/e2e/*.test.js",
+    "test:integration": "node --test tests/integration/*.test.js",
+    "test:all": "npm run lint && npm run typecheck && npm run test && npm run test:integration && npm run build && npm run test:e2e"
   }
 }

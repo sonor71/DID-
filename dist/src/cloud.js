@@ -1,5 +1,6 @@
-const SUPABASE_URL='https://bvnbqjhgnlvthkluddfj.supabase.co';
-const SUPABASE_KEY='sb_publishable_s2R7vW5VSbr86iCWYnRAgA_hgAvpscz';
+import {config} from './config.js';
+const SUPABASE_URL=config.supabaseUrl;
+const SUPABASE_KEY=config.supabasePublishableKey;
 const SESSION_KEY='d20-supabase-session-v1';
 
 let session=loadSession();
@@ -58,6 +59,7 @@ export async function verifyOtp({method,identifier,token}){
 }
 
 export async function checkServerConnection(){
+  if(!SUPABASE_URL||!SUPABASE_KEY)return false;
   try{
     const res=await fetch(`${SUPABASE_URL}/rest/v1/lit_profiles?select=id&limit=1`,{headers:{apikey:SUPABASE_KEY}});
     if(!res.ok)return false;
@@ -101,24 +103,28 @@ export async function updateMyProfile(patch){
 }
 
 export async function fetchDiscoveryCatalogs(){
-  const [genres,topics]=await Promise.all([
+  const [genres,topics,formats,audiences,tags]=await Promise.all([
     rest('lit_genres?active=eq.true&select=id,slug,name,parent_id,sort_order&order=sort_order.asc&limit=200'),
-    rest('lit_topics?active=eq.true&select=id,slug,name,group_name,sort_order&order=group_name.asc,sort_order.asc&limit=300')
-  ]);return {genres:genres||[],topics:topics||[]};
+    rest('lit_topics?active=eq.true&select=id,slug,name,group_name,sort_order&order=group_name.asc,sort_order.asc&limit=300'),
+    rest('lit_work_formats?active=eq.true&select=id,slug,name,sort_order&order=sort_order.asc&limit=100'),
+    rest('lit_audience_segments?active=eq.true&select=id,slug,name,sort_order&order=sort_order.asc&limit=100'),
+    rest('lit_tags?active=eq.true&select=id,slug,name,group_name,adult_only,content_warning,aliases,sort_order&order=group_name.asc,sort_order.asc&limit=1000')
+  ]);return {genres:genres||[],topics:topics||[],formats:formats||[],audiences:audiences||[],tags:tags||[]};
 }
 export async function fetchMyProfileDetails(){
   await ensureSession();const me=session?.user?.id;if(!me)return {favoriteBooks:[],socialLinks:[],genrePreferences:[],topicPreferences:[],followers:0,following:0};
   await rpc('lit_evaluate_my_achievements').catch(()=>null);
-  const [favoriteBooks,socialLinks,genrePreferences,topicPreferences,followers,following,achievementProgress,achievements]=await Promise.all([
+  const [favoriteBooks,socialLinks,genrePreferences,topicPreferences,followers,following,achievementProgress,achievements,formatPreferences,audiencePreferences,tagPreferences]=await Promise.all([
     rest(`lit_profile_favorite_books?user_id=eq.${me}&select=id,title,author_name,cover_path,external_url,sort_order&order=sort_order.asc&limit=50`),
     rest(`lit_profile_social_links?user_id=eq.${me}&select=id,platform,label,url,sort_order&order=sort_order.asc&limit=50`),
     rest(`lit_profile_genre_preferences?user_id=eq.${me}&select=genre_id,preference&limit=300`),rest(`lit_profile_topic_preferences?user_id=eq.${me}&select=topic_id,preference&limit=300`),
     rest(`lit_follows?following_id=eq.${me}&select=follower_id&limit=1000`),rest(`lit_follows?follower_id=eq.${me}&select=following_id&limit=1000`),
-    rest(`lit_user_achievements?user_id=eq.${me}&select=achievement_id,earned_at,progress,showcase_order&limit=100`),rest('lit_achievements?active=eq.true&select=id,slug,name,description,category,icon,rarity,condition_value&limit=100')
+    rest(`lit_user_achievements?user_id=eq.${me}&select=achievement_id,earned_at,progress,showcase_order&limit=100`),rest('lit_achievements?active=eq.true&select=id,slug,name,description,category,icon,rarity,condition_value&limit=100'),rest(`lit_profile_format_preferences?user_id=eq.${me}&select=format_id,preference&limit=100`),rest(`lit_profile_audience_preferences?user_id=eq.${me}&select=audience_id,preference&limit=100`),rest(`lit_profile_tag_preferences?user_id=eq.${me}&select=tag_id,preference&limit=1000`)
   ]);
   const progressMap=Object.fromEntries((achievementProgress||[]).map(row=>[row.achievement_id,row]));const userAchievements=(achievements||[]).map(item=>({...item,...(progressMap[item.id]||{progress:0,earned_at:null})}));
-  return {favoriteBooks:favoriteBooks||[],socialLinks:socialLinks||[],genrePreferences:genrePreferences||[],topicPreferences:topicPreferences||[],followers:followers?.length||0,following:following?.length||0,achievements:userAchievements};
+  return {favoriteBooks:favoriteBooks||[],socialLinks:socialLinks||[],genrePreferences:genrePreferences||[],topicPreferences:topicPreferences||[],followers:followers?.length||0,following:following?.length||0,achievements:userAchievements,formatPreferences:formatPreferences||[],audiencePreferences:audiencePreferences||[],tagPreferences:tagPreferences||[]};
 }
+export async function replaceMyTaxonomyV2Preferences(preferences){return rpc('lit_replace_my_taxonomy_v2_preferences',{p_formats:preferences.formats||[],p_audiences:preferences.audiences||[],p_tags:preferences.tags||[]});}
 export async function replaceMyProfileDetails({favoriteBooks=[],socialLinks=[],preferences}){
   return rpc('lit_replace_my_profile_details',{p_books:favoriteBooks,p_links:socialLinks,p_wanted_genres:preferences.wantedGenres,p_unwanted_genres:preferences.unwantedGenres,p_wanted_topics:preferences.wantedTopics,p_unwanted_topics:preferences.unwantedTopics});
 }
@@ -269,13 +275,14 @@ const kindFromDb=(kind)=>({novel:'Роман',novella:'Повесть',story:'Р
 
 export async function fetchCloudLiterature(){
   await ensureSession();const me=session?.user?.id;if(!me)return {works:[],reviews:[]};
-  const works=await rest('lit_works?select=*&order=updated_at.desc&limit=200');
+  const works=await rest('lit_works?select=id,author_id,title,summary,kind,status,genres,topics,content_rating,cover_path,format_id,created_at,updated_at,published_at,writing_status&order=updated_at.desc&limit=200');
   if(!works?.length)return {works:[],reviews:[]};
   const workIds=works.map(w=>w.id);
-  const [versions,profiles,reviews]=await Promise.all([
-    rest(`lit_work_versions?work_id=in.(${inFilter(workIds)})&select=*&order=version_no.desc`),
+  const [versions,profiles,reviews,workGenres,workAudiences,workTags]=await Promise.all([
+    rest(`lit_work_versions?work_id=in.(${inFilter(workIds)})&select=id,work_id,version_no,title,content,plain_text,evaluation_open,evaluation_excerpt,evaluation_meta,published_at,created_at&order=version_no.desc`),
     rest(`lit_profiles?id=in.(${inFilter([...new Set(works.map(w=>w.author_id))])})&select=id,username,nickname,avatar_path,account_role,author_verified`),
-    rest(`lit_reviews?work_id=in.(${inFilter(workIds)})&select=*&order=created_at.desc`)
+    rest(`lit_reviews?work_id=in.(${inFilter(workIds)})&select=id,reviewer_id,work_id,version_id,scope,anonymous,rating,category_ratings,body,annotations,created_at&order=created_at.desc`),
+    rest(`lit_work_genres?work_id=in.(${inFilter(workIds)})&select=work_id,genre_id,is_primary&limit=1000`),rest(`lit_work_audiences?work_id=in.(${inFilter(workIds)})&select=work_id,audience_id&limit=1000`),rest(`lit_work_tags?work_id=in.(${inFilter(workIds)})&select=work_id,tag_id&limit=5000`)
   ]);
   const reviewerIds=[...new Set((reviews||[]).map(r=>r.reviewer_id))];
   const [reviewers,reactions]=await Promise.all([
@@ -302,7 +309,7 @@ export async function fetchCloudLiterature(){
       version:String(v.version_no),rating:0,ratingsCount:0,authorActivity:50,createdAt:w.created_at,minutes:Math.max(1,Math.ceil(String(v.plain_text||'').length/900)),
       publicationStatus:w.status==='published'&&!!v.published_at?'published':'draft',evaluationStatus:v.evaluation_open?'open':'closed',status:v.evaluation_open?'evaluation':(w.status==='published'&&v.published_at?'published':'draft'),
       targetType:meta.targetType||'Фрагмент',evaluationTarget:meta.evaluationTarget||'Фрагмент',evaluationText:v.evaluation_excerpt||'',feedbackWanted:meta.feedbackWanted||[],content:v.plain_text||'',
-      creationType:content.creationType||'work',editorMode:content.editorMode||'document',documentPages:content.documentPages||[],bookPages:content.bookPages||[],mediaLibrary:content.mediaLibrary||[],contentRating:w.content_rating||'general',topics:w.topics||[]
+      creationType:content.creationType||'work',editorMode:content.editorMode||'document',documentPages:content.documentPages||[],bookPages:content.bookPages||[],mediaLibrary:content.mediaLibrary||[],contentRating:w.content_rating||'general',topics:w.topics||[],formatId:w.format_id||null,writingStatus:w.writing_status||'draft',genreIds:(workGenres||[]).filter(row=>row.work_id===w.id).sort((a,b)=>Number(b.is_primary)-Number(a.is_primary)).map(row=>row.genre_id),audienceIds:(workAudiences||[]).filter(row=>row.work_id===w.id).map(row=>row.audience_id),tagIds:(workTags||[]).filter(row=>row.work_id===w.id).map(row=>row.tag_id)
     });
   }
   const uiReviews=(reviews||[]).map(r=>{
@@ -337,6 +344,8 @@ export async function saveCloudWork(local,{mode='draft'}={}){
   if(!version)throw new Error('Не удалось сохранить версию');
   return {work,version};
 }
+
+export async function saveCloudWorkTaxonomy(workId,taxonomy){return rpc('lit_replace_work_taxonomy',{p_work:workId,p_format:taxonomy.formatId||null,p_genres:(taxonomy.genreIds||[]).slice(0,3),p_audiences:taxonomy.audienceIds||[],p_tags:(taxonomy.tagIds||[]).slice(0,30)});}
 
 export async function saveCloudReview({work,review}){
   await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Сначала войдите');

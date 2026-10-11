@@ -1,14 +1,15 @@
-import {state,update,reset,save,xpToLevel} from './state.js';
-import {ANNOTATION_TYPES,FEEDBACK_CATEGORIES,GENRES} from './data.js';
+import {state,update,save,xpToLevel} from './state.js';
+import {ANNOTATION_TYPES,FEEDBACK_CATEGORIES} from './data.js';
 import * as pages from './pages.js';
 import {esc,modal,toast} from './ui.js';
-import {ensureSession,getSession,signOut,getMyProfile,updateMyProfile,fetchPublicFeed,createCloudPost,toggleCloudPostLike,fetchPostComments,createCloudComment,setCloudCommentReaction,isCloudAuthenticated,requestOtp,verifyOtp,createMyProfile,checkServerConnection,findProfileByUsername,getOrCreateDirectConversation,createCloudGroupConversation,fetchMyConversations,fetchConversationMessages,sendCloudMessage,getConversationPeer,createCloudCall,fetchIncomingCalls,getCloudCall,setCloudCallStatus,sendCloudCallSignal,fetchCloudCallSignals,fetchNotifications,markNotificationRead,markAllNotificationsRead,createReport,fetchModerationReports,setModerationReportStatus,requestAuthorVerification,fetchMyVerificationRequests,fetchVerificationRequests,resolveAuthorVerification,fetchCloudLiterature,saveCloudWork,saveCloudReview,setCloudReviewReaction,saveCloudReadingProgress,uploadWorkAsset,publicObjectUrl,fetchDiscoveryCatalogs,fetchMyProfileDetails,replaceMyProfileDetails,uploadProfileMedia,createEvaluationSession,completeEvaluationItem,fetchEvaluationCatalog,saveCloudFragment,createCloudAnnotation,deleteCloudAnnotation,fetchAuthorFeedback} from './cloud.js';
+import {ensureSession,getSession,signOut,getMyProfile,updateMyProfile,fetchPublicFeed,createCloudPost,toggleCloudPostLike,fetchPostComments,createCloudComment,setCloudCommentReaction,isCloudAuthenticated,requestOtp,verifyOtp,createMyProfile,checkServerConnection,findProfileByUsername,getOrCreateDirectConversation,createCloudGroupConversation,fetchMyConversations,fetchConversationMessages,sendCloudMessage,getConversationPeer,createCloudCall,fetchIncomingCalls,getCloudCall,setCloudCallStatus,sendCloudCallSignal,fetchCloudCallSignals,fetchNotifications,markNotificationRead,markAllNotificationsRead,createReport,fetchModerationReports,setModerationReportStatus,requestAuthorVerification,fetchMyVerificationRequests,fetchVerificationRequests,resolveAuthorVerification,fetchCloudLiterature,saveCloudWork,saveCloudReview,setCloudReviewReaction,saveCloudReadingProgress,uploadWorkAsset,publicObjectUrl,fetchDiscoveryCatalogs,fetchMyProfileDetails,replaceMyProfileDetails,uploadProfileMedia,createEvaluationSession,completeEvaluationItem,fetchEvaluationCatalog,saveCloudFragment,createCloudAnnotation,deleteCloudAnnotation,fetchAuthorFeedback,saveCloudWorkTaxonomy} from './cloud.js';
 import {AssetService} from './editor/AssetService.js';
 import {createEditorRoot} from './editor/EditorRoot.js';
 import {profileEditor} from './profile/ProfileEditor.js';
 import {normalizePreferences,normalizeUrl,parseRows,profilePayload} from './profile/ProfileService.js';
 import {cropProfileImage} from './profile/ProfileMediaService.js';
 import {captureTextAnchor} from './annotations/TextAnchor.js';
+import {sanitizeHtml,sanitizePaste} from './security/SanitizeHtml.js';
 import {advanceSession,createLocalSession,validateSessionSize} from './evaluation/EvaluationService.js';
 
 const app=document.querySelector('#app');
@@ -56,7 +57,7 @@ document.addEventListener('keydown',event=>{
 function render(){
   if(!authReady){app.innerHTML='<main class="onboarding"><section class="onboard-card"><h2>Подключение к FRAKTUM…</h2><p class="muted">Проверяем сессию Supabase.</p></section></main>';return;}
   if(!isCloudAuthenticated()||!state.user||forceAuthScreen){ const auth={method:authMethod,pending:otpPending,fromApp:false}; app.innerHTML= loginMode?pages.loginPage(auth):(signupRole?pages.registration(signupRole,auth):pages.onboarding()); attachSpecial(); return; }
-  const map={home:pages.home,evaluate:pages.evaluatePage,evaluation:pages.evaluationSession,read:pages.readDiscovery,work:pages.workDetailPage,reader:pages.readerPage,library:pages.library,create:pages.createPage,notes:pages.notesPage,specialists:pages.specialistsPage,communities:pages.communitiesPage,community:pages.communityDetail,messages:pages.messagesPage,journal:pages.journalPage,profile:pages.profilePage,analytics:pages.analyticsPage,admin:pages.adminPage,feedback:pages.feedbackPage};
+  const map={home:pages.home,evaluate:pages.evaluatePage,evaluation:pages.evaluationSession,read:pages.readDiscovery,work:pages.workDetailPage,reader:pages.readerPage,library:pages.library,create:pages.createPage,notes:pages.notesPage,communities:pages.communitiesPage,community:pages.communityDetail,messages:pages.messagesPage,profile:pages.profilePage,analytics:pages.analyticsPage,admin:pages.adminPage,feedback:pages.feedbackPage};
   app.innerHTML=(map[state.ui.page]||pages.home)();
   if(state.ui.modal) app.insertAdjacentHTML('beforeend',state.ui.modal);
   if(state.ui.toast){ app.insertAdjacentHTML('beforeend',toast(state.ui.toast)); setTimeout(()=>{update(s=>s.ui.toast=null,{persist:false}); const t=document.querySelector('.toast'); if(t)t.remove();},1800); }
@@ -102,6 +103,7 @@ function attachSpecial(){
     ed.addEventListener('keyup',()=>{rememberEditorSelection();updateEditorWordCount();syncEditorToolbar();scheduleStudioAutosave();});
     ed.addEventListener('input',()=>{updateEditorWordCount();scheduleStudioAutosave();});
     ed.addEventListener('keydown',handleEditorShortcuts);
+    ed.addEventListener('paste',sanitizePaste);
   });
   const ribbon=document.querySelector('.word-ribbon');
   if(ribbon) ribbon.addEventListener('pointerdown',e=>{if(!e.target.closest('input[type="color"]'))rememberEditorSelection();},true);
@@ -113,6 +115,7 @@ function attachSpecial(){
   const avatarUpload=document.querySelector('#profileAvatarUpload');if(avatarUpload)avatarUpload.addEventListener('change',event=>handleProfileMedia(event,'avatar'));
   const bannerUpload=document.querySelector('#profileBannerUpload');if(bannerUpload)bannerUpload.addEventListener('change',event=>handleProfileMedia(event,'banner'));
   document.querySelectorAll('[data-tag-search]').forEach(input=>input.addEventListener('input',()=>{const query=input.value.trim().toLowerCase();input.closest('.preference-selector')?.querySelectorAll('[data-tag-label]').forEach(label=>{label.hidden=!!query&&!label.dataset.tagLabel.includes(query);});}));
+  document.querySelectorAll('[data-taxonomy-search]').forEach(input=>input.addEventListener('input',()=>{const query=input.value.trim().toLowerCase();input.closest('.taxonomy-choices')?.querySelectorAll('[data-taxonomy-label]').forEach(label=>{label.hidden=!!query&&!label.dataset.taxonomyLabel.includes(query);});}));
   document.querySelectorAll('.preference-selector input[type="checkbox"]').forEach(input=>input.addEventListener('change',()=>{
     if(!input.checked)return;const [domain,side]=input.closest('[data-preference-kind]').dataset.preferenceKind.split('-');const opposite=document.querySelector(`[data-preference-kind="${domain}-${side==='wanted'?'unwanted':'wanted'}"] input[value="${CSS.escape(input.value)}"]`);if(opposite)opposite.checked=false;
   }));
@@ -166,7 +169,7 @@ function cleanEditorHtml(el){
   const clone=el.cloneNode(true);
   clone.querySelectorAll('.media-drag-handle,.media-resize-handle').forEach(x=>x.remove());
   clone.querySelectorAll('.embedded-media').forEach(x=>x.classList.remove('selected','dragging'));
-  return clone.innerHTML;
+  return sanitizeHtml(clone.innerHTML);
 }
 
 function selectMediaFigure(figure){
@@ -313,7 +316,7 @@ function applyCanvasObjectGeometry(obj){
   obj.style.left=canvasPercent(x,PAGE_CANVAS_W);obj.style.top=canvasPercent(y,PAGE_CANVAS_H);obj.style.width=canvasPercent(w,PAGE_CANVAS_W);obj.style.height=canvasPercent(h,PAGE_CANVAS_H);obj.style.zIndex=String(Number(obj.dataset.z)||1);obj.style.transform=`rotate(${r}deg)`;
 }
 function cleanCanvasTextHtml(content){
-  const clone=content.cloneNode(true);clone.querySelectorAll('.canvas-wrap-proxy').forEach(x=>x.remove());return clone.innerHTML;
+  const clone=content.cloneNode(true);clone.querySelectorAll('.canvas-wrap-proxy').forEach(x=>x.remove());return sanitizeHtml(clone.innerHTML);
 }
 function serializeCanvasObject(obj,old={}){
   const base={...old,id:obj.dataset.objectId,type:obj.dataset.objectType||old.type||'text',x:Number(obj.dataset.x)||0,y:Number(obj.dataset.y)||0,w:Number(obj.dataset.w)||100,h:Number(obj.dataset.h)||100,z:Number(obj.dataset.z)||1,rotation:Number(obj.dataset.rotation)||0,locked:obj.dataset.locked==='1'};
@@ -920,7 +923,7 @@ function searchGlobal(q){
   q=(q||'').trim().toLowerCase(); if(!q)return;
   const w=state.works.find(x=>x.title.toLowerCase().includes(q)||x.author.toLowerCase().includes(q));
   if(w){update(s=>{s.ui.selectedWorkId=w.id;s.ui.page=w.publicationStatus==='published'?'work':'home';},{persist:false});render();return;}
-  notify('Ничего не найдено в демо-данных');
+  notify('Ничего не найдено');
 }
 
 app.addEventListener('click',async e=>{
@@ -1023,7 +1026,6 @@ app.addEventListener('click',async e=>{
   if(action==='new-version') return newVersion();
   if(action==='evaluate-next'){closeModal();return startEvaluation();}
   if(action==='save-notes') return saveNotes();
-  if(action==='invite-specialist') return notify('Приглашение отправлено (демо)');
   if(action==='join-community') return joinCommunity(el.dataset.id);
   if(action==='open-community'){update(s=>{s.ui.selectedCommunityId=el.dataset.id;s.ui.page='community';},{persist:false});render();return;}
   if(action==='create-community') return communityDialog();
@@ -1043,7 +1045,6 @@ app.addEventListener('click',async e=>{
   if(action==='accept-cloud-call') return acceptCloudCall(el.dataset.id);
   if(action==='decline-cloud-call') return declineCloudCall(el.dataset.id);
   if(action==='end-call') return endCall(true);
-  if(action==='reset-demo'){reset();signupRole=null;render();return;}
 });
 
 
@@ -1227,7 +1228,7 @@ function startEvaluation(){
 function evaluationFiltersDialog(){
   const f=state.ui.evaluationFilters||{genres:[],kinds:[],length:'any'};
   const kinds=['Роман','Рассказ','Повесть','Стихотворение','Фрагмент'];
-  openModal(`<h2>Фильтр оценки</h2><p class="muted">Настройте, какие короткие отрывки будут попадаться в режиме «Оценить».</p><form id="evaluationFiltersForm"><fieldset><legend>Жанры</legend><div class="chip-checks">${GENRES.map(g=>`<label><input type="checkbox" name="genres" value="${g}" ${(f.genres||[]).includes(g)?'checked':''}><span>${g}</span></label>`).join('')}</div></fieldset><fieldset><legend>Тип произведения</legend><div class="chip-checks">${kinds.map(k=>`<label><input type="checkbox" name="kinds" value="${k}" ${(f.kinds||[]).includes(k)?'checked':''}><span>${k}</span></label>`).join('')}</div></fieldset><label>Размер отрывка<select name="length"><option value="any" ${f.length==='any'?'selected':''}>Любой, до 5 минут</option><option value="tiny" ${f.length==='tiny'?'selected':''}>Очень короткий, до 2 минут</option><option value="short" ${f.length==='short'?'selected':''}>Обычный, 3–5 минут</option></select></label><button class="primary wide">Сохранить фильтр</button></form>`,'wide');
+  openModal(`<h2>Фильтр оценки</h2><p class="muted">Настройте, какие короткие отрывки будут попадаться в режиме «Оценить».</p><form id="evaluationFiltersForm"><fieldset class="taxonomy-choices"><legend>Жанры</legend><input type="search" data-taxonomy-search placeholder="Найти жанр"><div class="taxonomy-choice-list">${(state.catalogs?.genres||[]).map(g=>`<label data-taxonomy-label="${esc(g.name.toLowerCase())}"><input type="checkbox" name="genres" value="${esc(g.name)}" ${(f.genres||[]).includes(g.name)?'checked':''}><span>${esc(g.name)}</span></label>`).join('')}</div></fieldset><fieldset><legend>Тип произведения</legend><div class="chip-checks">${kinds.map(k=>`<label><input type="checkbox" name="kinds" value="${k}" ${(f.kinds||[]).includes(k)?'checked':''}><span>${k}</span></label>`).join('')}</div></fieldset><label>Размер отрывка<select name="length"><option value="any" ${f.length==='any'?'selected':''}>Любой, до 5 минут</option><option value="tiny" ${f.length==='tiny'?'selected':''}>Очень короткий, до 2 минут</option><option value="short" ${f.length==='short'?'selected':''}>Обычный, 3–5 минут</option></select></label><button class="primary wide">Сохранить фильтр</button></form>`,'wide');
 }
 function saveEvaluationFilters(fd){
   update(s=>{s.ui.evaluationFilters={genres:fd.getAll('genres'),kinds:fd.getAll('kinds'),length:String(fd.get('length')||'any')};s.ui.evaluationWorkId=null;s.ui.modal=null;s.ui.page='evaluate';});
@@ -1318,7 +1319,7 @@ function collectEditor(){
   if(w.editorMode==='book') content=(w.bookPages||[]).filter(p=>p.type==='content').map(p=>(p.canvas?.objects||[]).filter(o=>o.type==='text').map(o=>textFromHtml(o.html)).filter(Boolean).join('\n')).filter(Boolean).join('\n\n');
   else content=(w.documentPages||[]).map(p=>textFromHtml(p.html)).filter(Boolean).join('\n\n');
   const evaluationText=w.creationType==='fragment'?content:String(fd.get('evaluationText')||w.evaluationText||'');
-  return {id:f.dataset.id,title:String(fd.get('title')||w.title||'').trim(),kind:fd.get('kind')||w.kind,genres:String(fd.get('genres')||'').split(',').map(x=>x.trim()).filter(Boolean),summary:String(fd.get('summary')||'').trim(),targetType:String(fd.get('targetType')||w.targetType||'Фрагмент'),evaluationTarget:String(fd.get('evaluationTarget')||w.evaluationTarget||'Фрагмент').trim(),evaluationText,feedbackWanted:fd.getAll('feedback'),content};
+  return {id:f.dataset.id,title:String(fd.get('title')||w.title||'').trim(),kind:fd.get('kind')||w.kind,genres:fd.getAll('genres').map(String).filter(Boolean),summary:String(fd.get('summary')||'').trim(),targetType:String(fd.get('targetType')||w.targetType||'Фрагмент'),evaluationTarget:String(fd.get('evaluationTarget')||w.evaluationTarget||'Фрагмент').trim(),evaluationText,feedbackWanted:fd.getAll('feedback'),formatId:Number(fd.get('formatId'))||null,genreIds:fd.getAll('genres').map(name=>Number(state.catalogs.genres.find(item=>item.name===name)?.id)).filter(Number.isFinite).slice(0,3),audienceIds:fd.getAll('audienceIds').map(Number).filter(Number.isFinite),tagIds:fd.getAll('tagIds').map(Number).filter(Number.isFinite).slice(0,30),content};
 }
 async function saveWork(mode='draft'){
   const x=collectEditor(); if(!x||!x.title){alert('Укажите название.');return;}
@@ -1327,7 +1328,7 @@ async function saveWork(mode='draft'){
   if(mode==='evaluation'&&!x.evaluationText.trim()&&!x.content.trim()){alert('Добавьте текст для оценки.');return;}
   update(s=>{
     const w=s.works.find(z=>z.id===x.id); if(!w)return;
-    Object.assign(w,{title:x.title,kind:x.kind,genres:x.genres,summary:x.summary,targetType:x.targetType,evaluationTarget:x.evaluationTarget,evaluationText:x.evaluationText,feedbackWanted:x.feedbackWanted,content:x.content,minutes:Math.max(1,Math.ceil(x.content.length/900))});
+    Object.assign(w,{title:x.title,kind:x.kind,genres:x.genres,summary:x.summary,targetType:x.targetType,evaluationTarget:x.evaluationTarget,evaluationText:x.evaluationText,feedbackWanted:x.feedbackWanted,formatId:x.formatId,genreIds:x.genreIds,audienceIds:x.audienceIds,tagIds:x.tagIds,content:x.content,minutes:Math.max(1,Math.ceil(x.content.length/900))});
     if(w.editorMode==='book'){const cover=w.bookPages?.find(p=>p.type==='cover');const title=w.bookPages?.find(p=>p.type==='title');if(cover){cover.title=w.title;cover.author=w.author;}if(title){title.title=w.title;title.author=w.author;}if(cover?.canvas?.background?.image)w.cover=cover.canvas.background.image;}
     if(mode==='published'&&!fragment){const first=w.publicationStatus!=='published';w.publicationStatus='published';w.publishedAt=w.publishedAt||new Date().toISOString();if(first)s.user.xp+=10;}
     if(mode==='evaluation'){const first=w.evaluationStatus!=='open';w.evaluationStatus='open';w.evaluationOpenedAt=new Date().toISOString();if(first)s.user.xp+=5;w.authorActivity=(w.authorActivity||0)+3;}
@@ -1338,7 +1339,8 @@ async function saveWork(mode='draft'){
     try{
       if(fragment){const result=await saveCloudFragment(local,{publish:mode==='evaluation'});update(s=>{const w=s.works.find(z=>z.id===local.id);if(w){w.fragmentCloudId=result.id;w.publicationStatus=result.visibility==='public'?'published':'draft';}});notify(mode==='evaluation'?'Фрагмент опубликован для оценки':'Фрагмент сохранён');return;}
       const result=await saveCloudWork(local,{mode});
-      const oldId=local.id;const newId=`cloud:${result.work.id}`;
+      await saveCloudWorkTaxonomy(result.work.id,{formatId:x.formatId,genreIds:x.genreIds,audienceIds:x.audienceIds,tagIds:x.tagIds});
+            const oldId=local.id;const newId=`cloud:${result.work.id}`;
       update(s=>{const w=s.works.find(z=>z.id===oldId);if(!w)return;w.id=newId;w.cloud=true;w.cloudId=result.work.id;w.cloudVersionId=result.version.id;w.version=String(result.version.version_no);if(s.ui.selectedStudioWorkId===oldId)s.ui.selectedStudioWorkId=newId;if(s.ui.selectedWorkId===oldId)s.ui.selectedWorkId=newId;for(const key of ['later','reading','completed'])s.library[key]=s.library[key].map(id=>id===oldId?newId:id);if(s.readingProgress[oldId]!=null){s.readingProgress[newId]=s.readingProgress[oldId];delete s.readingProgress[oldId];}});
     }catch(err){alert(`Локально сохранено, но Supabase не синхронизирован: ${err.message}`);return;}
   }
@@ -1371,6 +1373,7 @@ async function saveProfile(fd){
 async function bootstrap(){
   const serverOnline=await checkServerConnection();
   update(s=>{s.cloud={...(s.cloud||{}),serverOnline};},{persist:false});
+  if(serverOnline){try{const catalogs=await fetchDiscoveryCatalogs();update(s=>s.catalogs=catalogs,{persist:false});}catch(error){console.warn('taxonomy bootstrap',error);}}
   await ensureSession().catch(()=>null);
   const auth=getSession();
   if(auth?.user?.id){
