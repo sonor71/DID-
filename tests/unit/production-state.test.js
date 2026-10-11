@@ -1,0 +1,2 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+test('fresh production state starts without demo entities',async()=>{globalThis.localStorage={getItem:()=>null,setItem(){},removeItem(){}};const {state}=await import(`../../src/state.js?empty=${Date.now()}`);for(const key of ['works','posts','communities','peopleDirectory','chatThreads','reviews'])assert.deepEqual(state[key],[]);});
