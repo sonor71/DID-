@@ -1,0 +1,2 @@
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';
+test('Supabase deployment coordinates are not hardcoded in feature code',()=>{const cloud=fs.readFileSync('src/cloud.js','utf8');assert.doesNotMatch(cloud,/bvnbqjhgnlvthkluddfj|sb_publishable_/);const example=fs.readFileSync('.env.example','utf8');for(const key of ['VITE_SUPABASE_URL','VITE_SUPABASE_PUBLISHABLE_KEY','VITE_PUSH_PUBLIC_KEY','VITE_ENABLE_DEMO_DATA'])assert.match(example,new RegExp(key));});
