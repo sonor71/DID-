@@ -9,3 +9,4 @@
 - OTP requests go directly to Supabase Auth with the configured publishable key and now expose useful, sanitized Supabase error messages.
 - Runtime diagnostics report whether the URL and publishable key are configured without printing their values.
 - Added an additive Taxonomy v2 production reconciliation migration with prerequisite type checks, explicit grants/RLS, indexes, idempotent seed data, RPC grants, legacy genre backfill, and a PostgREST schema-cache reload.
+- Added a complete frontend schema contract audit and a single consolidated reconciliation migration for every v0.19 identity, discovery, evaluation, feedback, achievement, and taxonomy relation.
