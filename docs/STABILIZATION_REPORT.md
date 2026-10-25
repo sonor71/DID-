@@ -1,6 +1,7 @@
 # Отчёт по стабилизации FRAKTUM Literature
 
 Дата: 26 октября 2026, Москва. Ветка: `codex-20261025-210012-production-stabilization`.
+Draft PR: https://github.com/sonor71/DID-/pull/9.
 
 **Production acceptance ещё не завершён.** Исправления и локальные проверки не
 доказывают соответствие production-схемы, доставку настоящего OTP и звонок двух
@@ -114,9 +115,11 @@ inbound/outbound RTP отдельно для audio и video. Это не тес�
 
 Для live advisor нужен `SUPABASE_ACCESS_TOKEN` через защищённые настройки и
 `FRAKTUM_PROJECT_REF`, выводимый из обычного URL проекта. Значения ключей в чат,
-Git, команды deploy и отчёт не копировались. GitHub Git-read работает, но
-`api.github.com` в текущем runtime отвечает proxy CONNECT HTTP 403; сохранённое
-добавление домена в черновик не означает применения к runtime.
+Git, команды deploy и отчёт не копировались. GitHub Git-read и push работают. Первичная REST-проверка `api.github.com`
+получила proxy CONNECT HTTP 403, однако последующее создание Draft PR #9 через
+`gh` успешно. Сохранение сетевого домена в черновике само по себе не доказывает
+применение к runtime. Существующая remote-ветка `codex` сохранена; для новой ветки
+использовано свободное имя без конфликтующего префикса `codex/`.
 
 В черновике среды обновлены `install_script`, `start_skill`, сохранены требования
 Supabase и добавлен Management API secret target `api.supabase.com`. Custom rules:
