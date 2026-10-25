@@ -18,3 +18,8 @@ test('major navigation and editor actions are registered without missing functio
  for(const action of ['canvas-add-text','insert-canvas-media','canvas-delete','preview-work','open-community'])assert.match(app,new RegExp(`action==='${action}'`));
  assert.doesNotMatch(pages,/onclick\s*=/);
 });
+test('development server protects configuration files and never serves HTML for missing assets',async()=>{
+ for(const path of ['/.env.example','/.git/config','/package.json','/src/not-a-module.js'])assert.equal((await fetch(`http://127.0.0.1:5199${path}`)).status,404);
+ assert.equal((await fetch('http://127.0.0.1:5199/%00')).status,400);
+ assert.equal((await fetch('http://127.0.0.1:5199/')).status,200,'Malformed request must not terminate the server');
+});

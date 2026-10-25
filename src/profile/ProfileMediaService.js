@@ -1,4 +1,37 @@
 const TYPES=new Set(['image/jpeg','image/png','image/webp']);
+const MEDIA_KINDS={avatar:{bucket:'lit-avatars',column:'avatar_path'},banner:{bucket:'lit-profile-banners',column:'banner_path'}};
+export function profileMediaKind(kind){
+  if(!Object.hasOwn(MEDIA_KINDS,kind))throw new TypeError('Неизвестный тип изображения профиля');
+  return MEDIA_KINDS[kind];
+}
+/** Explicit null from the server means removed, never resurrect the cached image. */
+export function profileMediaState(profile,fallback={},resolveUrl){
+  const result={};
+  for(const kind of ['avatar','banner']){
+    const {bucket,column}=profileMediaKind(kind);
+    const path=Object.hasOwn(profile||{},column)?profile[column]||'':fallback[`${kind}Path`]||'';
+    result[`${kind}Path`]=path;
+    result[`${kind}Url`]=path?resolveUrl(bucket,path):Object.hasOwn(profile||{},column)?'':fallback[`${kind}Url`]||'';
+  }
+  return result;
+}
+export function attachProfileImageErrors(root){
+  root.addEventListener('error',event=>{
+    const image=event.target;
+    if(!image.matches?.('[data-profile-image],[data-profile-preview]'))return;
+    image.hidden=true;
+    if(image.nextElementSibling?.matches('.profile-image-error'))return;
+    const message=document.createElement('span');message.className='profile-image-error';message.setAttribute('role','status');
+    message.textContent='Изображение недоступно. Загрузите его повторно в настройках профиля.';
+    image.insertAdjacentElement('afterend',message);
+  },true);
+  root.addEventListener('load',event=>{
+    const image=event.target;
+    if(!image.matches?.('[data-profile-image],[data-profile-preview]'))return;
+    image.hidden=false;
+    if(image.nextElementSibling?.matches('.profile-image-error'))image.nextElementSibling.remove();
+  },true);
+}
 export function validateProfileImage(file,maxBytes=8_000_000){
   if(!file||!TYPES.has(file.type))throw new TypeError('Выберите JPEG, PNG или WebP');
   if(file.size<=0||file.size>maxBytes)throw new TypeError('Изображение должно быть меньше 8 МБ');

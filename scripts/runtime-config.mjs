@@ -1,12 +1,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import {buildIceServers} from '../src/webrtc-config.js';
 
 export const PUBLIC_RUNTIME_KEYS = [
   'VITE_SUPABASE_URL',
   'VITE_SUPABASE_PUBLISHABLE_KEY',
   'VITE_PUSH_PUBLIC_KEY',
   'VITE_FRAKTUM_GAME_URL',
-  'VITE_ENABLE_DEMO_DATA'
+  'VITE_ENABLE_DEMO_DATA',
+  'VITE_TURN_URL',
+  'VITE_TURN_USERNAME',
+  'VITE_TURN_CREDENTIAL',
+  'VITE_CALL_DEBUG'
 ];
 
 function cleanValue(value) {
@@ -66,6 +71,8 @@ export function createRuntimeConfig(environment) {
     throw new Error('Invalid VITE_SUPABASE_PUBLISHABLE_KEY: expected an sb_publishable_ key or legacy anon JWT');
   }
   config.VITE_ENABLE_DEMO_DATA = String(config.VITE_ENABLE_DEMO_DATA).toLowerCase() === 'true' ? 'true' : 'false';
+  config.VITE_CALL_DEBUG = String(config.VITE_CALL_DEBUG).toLowerCase() === 'true' ? 'true' : 'false';
+  buildIceServers(config);
   return config;
 }
 

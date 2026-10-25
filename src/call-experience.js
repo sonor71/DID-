@@ -31,7 +31,7 @@ async function unlockAudio() {
     osc.stop(ctx.currentTime + 0.025);
     return true;
   } catch (error) {
-    console.warn('FRAKTUM call audio unlock failed', error);
+    if(globalThis.__FRAKTUM_CONFIG__?.VITE_CALL_DEBUG==='true')console.debug('[FRAKTUM call audio] unlock failed',{name:error?.name||'Error'});
     return false;
   }
 }
@@ -153,7 +153,7 @@ async function startCallSound(mode) {
 }
 
 // Unlock as early as possible after any real user interaction.
-const prime = () => { unlockAudio().catch(() => {}); };
+const prime = () => { void unlockAudio(); };
 document.addEventListener('pointerdown', prime, { capture: true });
 document.addEventListener('touchstart', prime, { capture: true, passive: true });
 document.addEventListener('keydown', prime, { capture: true });
@@ -175,7 +175,10 @@ function showNotificationOptIn() {
   document.body.appendChild(box);
   box.querySelector('#fraktumCallNotifyLater')?.addEventListener('click', () => box.remove());
   box.querySelector('#fraktumCallNotifyEnable')?.addEventListener('click', async () => {
-    try { await window.Notification.requestPermission(); } catch {}
+    try { await window.Notification.requestPermission(); } catch {
+      box.querySelector('div').textContent='Браузер не разрешил уведомления. Проверьте разрешения сайта.';
+      return;
+    }
     await unlockAudio();
     box.remove();
   });
@@ -195,7 +198,7 @@ function notifyIncomingCall({ id, caller, mode }) {
     });
     n.onclick = () => { window.focus(); n.close(); };
   } catch (error) {
-    console.warn('FRAKTUM call notification failed', error);
+    if(globalThis.__FRAKTUM_CONFIG__?.VITE_CALL_DEBUG==='true')console.debug('[FRAKTUM call notification] unavailable',{name:error?.name||'Error'});
   }
 }
 
@@ -219,7 +222,7 @@ function detectIncomingCall() {
 
 function detectOutgoingCall() {
   const overlay = document.querySelector('#realCallOverlay');
-  const status = document.querySelector('#realCallStatus')?.textContent?.trim() || '';
+  const state = overlay?.dataset.callState || '';
   if (outgoingPending && overlay && !outgoingActive) {
     outgoingPending = false;
     outgoingActive = true;
@@ -227,7 +230,7 @@ function detectOutgoingCall() {
     outgoingPendingTimer = null;
     startCallSound('outgoing');
   }
-  if (outgoingActive && (!overlay || ['Соединено', 'Звонок отклонён', 'Звонок завершён', 'Связь прервана'].includes(status))) {
+  if (outgoingActive && (!overlay || ['connected','failed','ended'].includes(state))) {
     outgoingActive = false;
     if (soundMode === 'outgoing') stopCallSound();
   }

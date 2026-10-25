@@ -5,6 +5,6 @@ export const stars=(n=0)=>`<span class="stars" aria-label="${n} из 5">${[1,2,3
 export const pill=(x)=>`<span class="pill">${esc(x)}</span>`;
 export const cover=(w,cls='')=>`<img class="cover ${cls}" src="${w.cover||'/assets/home/reading-cover.png'}" alt="">`;
 export const progress=(value)=>`<div class="progress"><i style="width:${clamp(value,0,100)}%"></i></div>`;
-export function toast(text){ return `<div class="toast">${esc(text)}</div>`; }
+export function toast(text){ return `<div class="toast" role="status" aria-live="polite">${esc(text)}</div>`; }
 export function empty(title,text){ return `<div class="empty"><h3>${esc(title)}</h3><p>${esc(text)}</p></div>`; }
-export function modal(content,size='normal'){ return `<div class="modal-backdrop" data-action="close-modal"><section class="modal ${size}" data-stop>${content}</section></div>`; }
+export function modal(content,size='normal'){ return `<div class="modal-backdrop" data-action="close-modal"><section class="modal ${size}" role="dialog" aria-modal="true" tabindex="-1" data-stop><button type="button" class="modal-close" data-action="close-modal" aria-label="Закрыть">×</button>${content}</section></div>`; }

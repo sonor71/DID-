@@ -1,3 +1,5 @@
+import {ensureStructuredPage} from './editor/MediaModel.js';
+import {assertPersistableDocument,EmbeddedMediaError} from './editor/Serialization.js';
 const KEY='d20-platform-v4';
 
 function textToHtml(text){
@@ -15,7 +17,7 @@ function canvasForLegacyPage(page,work,index){
       background:{color:'#f7f1e5',image:'',fit:'cover',position:'center',...(p.canvas.background||{})},
       textColor:p.canvas.textColor||'#191715',
       objects:p.canvas.objects.map((o,i)=>({
-        id:o.id||`obj-${now}-${index}-${i}`,
+        ...o,id:o.id||`obj-${now}-${index}-${i}`,
         type:o.type==='image'?'image':'text',
         x:Number.isFinite(Number(o.x))?Number(o.x):70,
         y:Number.isFinite(Number(o.y))?Number(o.y):80,
@@ -61,7 +63,8 @@ function normalizeWork(work){
       {id:'page-'+(w.id||Date.now())+'-1',type:'content',html:textToHtml(w.content||'')}
     ];
   }
-  w.bookPages=w.bookPages.map((p,i)=>({...p,canvas:canvasForLegacyPage(p,w,i)}));
+  w.bookPages=w.bookPages.map((p,i)=>ensureStructuredPage({...p,canvas:canvasForLegacyPage(p,w,i)}));
+  w.documentPages=w.documentPages.map(p=>ensureStructuredPage(p));
   if(!Array.isArray(w.mediaLibrary)) w.mediaLibrary=[];
   if(w.evaluationStatus==='open') w.status='evaluation';
   else w.status=w.publicationStatus==='published'?'published':'draft';
@@ -96,7 +99,7 @@ function baseState(){
     verificationRequests:[],
     privateNotes:'',
     ui:{
-      page:'home',sidebarOpen:false,profileTab:'overview',selectedWorkId:null,selectedCommunityId:null,selectedStudioWorkId:null,
+      page:'home',documentPageIndex:0,sidebarOpen:false,profileTab:'overview',selectedWorkId:null,selectedCommunityId:null,selectedStudioWorkId:null,
       modal:null,toast:null,selectedQuote:'',chatPanelOpen:false,chatTab:'chats',selectedChatId:'dm-elara',evaluationWorkId:null,evaluationMode:null,
       evaluationFilters:{genres:[],kinds:[],length:'any'},
       readFilters:{query:'',genre:'',length:''},
@@ -143,7 +146,18 @@ export let state=loadState();
 export function save(){
   const copy=structuredClone(state);
   copy.ui.modal=null; copy.ui.toast=null; copy.ui.selectedQuote='';
+  try{assertPersistableDocument(copy);}catch(error){
+    if(!(error instanceof EmbeddedMediaError))throw error;
+    // Retain the user's original legacy snapshot until uploads finish. Auth/navigation
+    // remain usable in memory; never replace an old draft with partially migrated data.
+    state.ui.localSaveStatus='migration-required';
+    state.ui.localSaveError='В старых черновиках есть незагруженные изображения. Откройте и сохраните каждый такой проект для переноса в облако. До переноса локальная копия остаётся без изменений.';
+    return false;
+  }
+  copy.ui.localSaveStatus='saved';copy.ui.localSaveError=null;
   localStorage.setItem(KEY,JSON.stringify(copy));
+  state.ui.localSaveStatus='saved';state.ui.localSaveError=null;
+  return true;
 }
 
 export function update(mutator,{persist=true}={}){

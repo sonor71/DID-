@@ -2,33 +2,54 @@ import {state,update,save,xpToLevel} from './state.js';
 import {ANNOTATION_TYPES,FEEDBACK_CATEGORIES} from './data.js';
 import * as pages from './pages.js';
 import {esc,modal,toast} from './ui.js';
-import {ensureSession,getSession,openFraktumGame,signOut,getMyProfile,updateMyProfile,fetchPublicFeed,createCloudPost,toggleCloudPostLike,fetchPostComments,createCloudComment,setCloudCommentReaction,isCloudAuthenticated,requestOtp,verifyOtp,createMyProfile,checkServerConnection,findProfileByUsername,getOrCreateDirectConversation,createCloudGroupConversation,fetchMyConversations,fetchConversationMessages,sendCloudMessage,getConversationPeer,createCloudCall,fetchIncomingCalls,getCloudCall,setCloudCallStatus,sendCloudCallSignal,fetchCloudCallSignals,fetchNotifications,markNotificationRead,markAllNotificationsRead,createReport,fetchModerationReports,setModerationReportStatus,requestAuthorVerification,fetchMyVerificationRequests,fetchVerificationRequests,resolveAuthorVerification,fetchCloudLiterature,saveCloudWork,saveCloudReview,setCloudReviewReaction,saveCloudReadingProgress,uploadWorkAsset,publicObjectUrl,fetchDiscoveryCatalogs,fetchMyProfileDetails,replaceMyProfileDetails,uploadProfileMedia,createEvaluationSession,completeEvaluationItem,fetchEvaluationCatalog,saveCloudFragment,createCloudAnnotation,deleteCloudAnnotation,fetchAuthorFeedback,saveCloudWorkTaxonomy} from './cloud.js';
+import {ensureSession,getSession,openFraktumGame,signOut,getMyProfile,updateMyProfile,fetchPublicFeed,fetchPublicPost,createCloudPost,toggleCloudPostLike,fetchPostComments,createCloudComment,setCloudCommentReaction,isCloudAuthenticated,requestOtp,verifyOtp,createMyProfile,checkServerConnection,findProfileByUsername,getOrCreateDirectConversation,createCloudGroupConversation,fetchMyConversations,fetchConversationMessages,sendCloudMessage,getConversationPeer,createCloudCall,fetchIncomingCalls,getCloudCall,setCloudCallStatus,sendCloudCallSignal,fetchCloudCallSignals,fetchNotifications,markNotificationRead,markAllNotificationsRead,createReport,fetchModerationReports,setModerationReportStatus,requestAuthorVerification,fetchMyVerificationRequests,fetchVerificationRequests,resolveAuthorVerification,fetchCloudLiterature,saveCloudWork,saveCloudReview,setCloudReviewReaction,saveCloudReadingProgress,uploadWorkAsset,publicObjectUrl,fetchDiscoveryCatalogs,fetchMyProfileDetails,replaceMyProfileDetails,uploadProfileMedia,removeProfileMedia,saveMyProfile,createEvaluationSession,completeEvaluationItem,fetchEvaluationCatalog,saveCloudFragment,createCloudAnnotation,deleteCloudAnnotation,fetchAuthorFeedback,saveCloudWorkTaxonomy} from './cloud.js';
 import {AssetService} from './editor/AssetService.js';
+import {SaveQueue} from './editor/SaveQueue.js';
+import {migrateEmbeddedWorkAssets} from './editor/LegacyMediaMigration.js';
+import {ensureStructuredPage,normalizeMediaObject,applyMediaLayout,assertWorkMediaReady,permanentMediaUrl} from './editor/MediaModel.js';
 import {createEditorRoot} from './editor/EditorRoot.js';
 import {profileEditor} from './profile/ProfileEditor.js';
-import {normalizePreferences,normalizeUrl,parseRows,profilePayload} from './profile/ProfileService.js';
-import {cropProfileImage} from './profile/ProfileMediaService.js';
+import {normalizePreferences,normalizeUrl,parseRows,profilePayload,profileTextState} from './profile/ProfileService.js';
+import {cropProfileImage,profileMediaState,attachProfileImageErrors} from './profile/ProfileMediaService.js';
 import {captureTextAnchor} from './annotations/TextAnchor.js';
 import {sanitizeHtml,sanitizePaste} from './security/SanitizeHtml.js';
 import {advanceSession,createLocalSession,validateSessionSize} from './evaluation/EvaluationService.js';
+import {CallSession} from './calls/CallSession.js';
+import {buildIceServers} from './webrtc-config.js';
+import {sharePost} from './feed/PostLinks.js';
+import {createNavigationTransition,parseRoute,routePath} from './navigation/Navigation.js';
+import {withBusy} from './navigation/AsyncFeedback.js';
 
 const app=document.querySelector('#app');
+attachProfileImageErrors(app);
+let permalinkPost=null;
+let permalinkLoading=false;
+let permalinkError='';
+let postRequest=0;
+const navigationTransition=createNavigationTransition({document,window,onError:error=>notify(`Переход не выполнен: ${error.message}`)});
+function locationRoute(){try{return parseRoute(window.location.href);}catch(error){return {page:'post',postId:null,error:error.message};}}
+let currentRoute=locationRoute();
+update(s=>{s.ui.page=currentRoute.page;},{persist:false});
+window.history.scrollRestoration='manual';
+window.history.replaceState({route:currentRoute,scroll:0},'',window.location.href);
+window.addEventListener('popstate',event=>navigateRoute(locationRoute(),{history:false,scroll:event.state?.scroll||0}));
 let signupRole=null;
 let loginMode=false;
 let forceAuthScreen=false;
 let authMethod='email';
 let otpPending=null;
 let cloudFeedLoaded=false;
+let toastTimer=null;
 let readerFont=18;
 let readerTheme=0;
 let animateChatOpen=false;
 let savedEditorRange=null;
 let selectedTextAnchor=null;
-let selectedMediaFigure=null;
 let selectedCanvasObject=null;
 const PAGE_CANVAS_W=760;
 const PAGE_CANVAS_H=1080;
 let studioAutosaveTimer=null;
+const studioCloudWrites=new SaveQueue();
 let bookFlipLocked=false;
 let swipeStartX=null;
 let authReady=false;
@@ -37,6 +58,7 @@ let incomingCallTimer=null;
 let notificationsTimer=null;
 let activeRtc=null;
 let callSignalTimer=null;
+let callSetupPending=false;
 const seenIncomingCalls=new Set();
 const workAssets=new AssetService({
   upload:(path,file)=>uploadWorkAsset(path,file),
@@ -45,7 +67,7 @@ const workAssets=new AssetService({
 const editorRoot=createEditorRoot({
   readSnapshot:()=>structuredClone(currentCanvasState()?.canvas||null),
   applySnapshot:snapshot=>{const ctx=currentCanvasState();if(!ctx||!snapshot)return;ctx.page.canvas=structuredClone(snapshot);save();render();},
-  onChange:()=>scheduleStudioAutosave()
+  onChange:()=>{scheduleStudioAutosave();updateEditorUndoControls();}
 });
 document.addEventListener('keydown',event=>{
   if(!(event.ctrlKey||event.metaKey)||event.key.toLowerCase()!=='z'||!document.querySelector('#freePageCanvas'))return;
@@ -56,42 +78,118 @@ document.addEventListener('keydown',event=>{
 
 function render(){
   if(!authReady){app.innerHTML='<main class="onboarding"><section class="onboard-card"><h2>Подключение к FRAKTUM…</h2><p class="muted">Проверяем сессию Supabase.</p></section></main>';return;}
-  if(!isCloudAuthenticated()||!state.user||forceAuthScreen){ const auth={method:authMethod,pending:otpPending,fromApp:false}; app.innerHTML= loginMode?pages.loginPage(auth):(signupRole?pages.registration(signupRole,auth):pages.onboarding()); attachSpecial(); return; }
-  const map={home:pages.home,evaluate:pages.evaluatePage,evaluation:pages.evaluationSession,read:pages.readDiscovery,work:pages.workDetailPage,reader:pages.readerPage,library:pages.library,create:pages.createPage,notes:pages.notesPage,communities:pages.communitiesPage,community:pages.communityDetail,messages:pages.messagesPage,profile:pages.profilePage,analytics:pages.analyticsPage,admin:pages.adminPage,feedback:pages.feedbackPage};
-  app.innerHTML=(map[state.ui.page]||pages.home)();
+  const publicView=!isCloudAuthenticated()||!state.user;
+  if(state.ui.page==='post'&&!forceAuthScreen){
+    app.innerHTML=pages.postPage(permalinkPost,{publicView,loading:permalinkLoading,error:permalinkError});
+  }else{
+    if(publicView||forceAuthScreen){ const auth={method:authMethod,pending:otpPending,fromApp:false}; app.innerHTML= loginMode?pages.loginPage(auth):(signupRole?pages.registration(signupRole,auth):pages.onboarding()); attachSpecial(); return; }
+    const map={home:pages.home,evaluate:pages.evaluatePage,evaluation:pages.evaluationSession,read:pages.readDiscovery,work:pages.workDetailPage,reader:pages.readerPage,library:pages.library,create:pages.createPage,notes:pages.notesPage,communities:pages.communitiesPage,community:pages.communityDetail,messages:pages.messagesPage,profile:pages.profilePage,analytics:pages.analyticsPage,admin:pages.adminPage,feedback:pages.feedbackPage};
+    app.innerHTML=(map[state.ui.page]||pages.home)();
+  }
   if(state.ui.modal) app.insertAdjacentHTML('beforeend',state.ui.modal);
-  if(state.ui.toast){ app.insertAdjacentHTML('beforeend',toast(state.ui.toast)); setTimeout(()=>{update(s=>s.ui.toast=null,{persist:false}); const t=document.querySelector('.toast'); if(t)t.remove();},1800); }
+  if(state.ui.toast)showToast(state.ui.toast);
   attachSpecial();
   animateDrawerIfNeeded();
 }
 
 function animateDrawerIfNeeded(){
   if(!animateChatOpen||!state.ui.chatPanelOpen)return;
-  const drawer=document.querySelector('.chat-drawer');
-  if(!drawer){animateChatOpen=false;return;}
-  drawer.classList.remove('open');
-  requestAnimationFrame(()=>requestAnimationFrame(()=>drawer.classList.add('open')));
+  const shell=document.querySelector('.chat-shell');
+  if(!shell){animateChatOpen=false;return;}
+  setChatShellOpen(false);
+  requestAnimationFrame(()=>requestAnimationFrame(()=>setChatShellOpen(!!state.ui.chatPanelOpen)));
   animateChatOpen=false;
+}
+
+function setChatShellOpen(opening){
+  const shell=document.querySelector('.chat-shell');
+  const drawer=shell?.querySelector('.chat-drawer');
+  const toggle=shell?.querySelector('.chat-edge-toggle');
+  if(!shell||!drawer||!toggle)return;
+  if(!opening&&drawer.contains(document.activeElement))toggle.focus();
+  shell.classList.toggle('is-open',opening);
+  drawer.inert=!opening;
+  drawer.setAttribute('aria-hidden',String(!opening));
+  toggle.setAttribute('aria-expanded',String(opening));
+  toggle.setAttribute('aria-label',opening?'Закрыть чаты':'Открыть чаты');
+  toggle.title=opening?'Закрыть чаты':'Открыть чаты';
+  toggle.textContent=opening?'›':'‹';
 }
 
 function toggleChatPanel(){
   const opening=!state.ui.chatPanelOpen;
   update(s=>s.ui.chatPanelOpen=opening,{persist:false});
-  const drawer=document.querySelector('.chat-drawer');
-  const toggles=document.querySelectorAll('[data-action="toggle-chat-panel"]');
-  if(drawer) drawer.classList.toggle('open',opening);
-  toggles.forEach(btn=>{if(btn.classList.contains('dock-toggle'))btn.textContent=opening?'›':'‹';});
+  setChatShellOpen(opening);
 }
 
-function notify(text){ update(s=>s.ui.toast=text,{persist:false}); render(); }
-function go(page){ update(s=>{s.ui.page=page;s.ui.modal=null;s.ui.sidebarOpen=false;},{persist:false}); render(); }
+function showToast(text){
+  clearTimeout(toastTimer);document.querySelector('.toast')?.remove();
+  app.insertAdjacentHTML('beforeend',toast(text));
+  toastTimer=setTimeout(()=>{update(s=>s.ui.toast=null,{persist:false});document.querySelector('.toast')?.remove();},3500);
+}
+function notify(text){update(s=>s.ui.toast=text,{persist:false});showToast(text);}
+function go(page){
+  const route={page};
+  if(['work','reader','analytics'].includes(page))route.work=state.ui.selectedWorkId;
+  if(page==='community')route.community=state.ui.selectedCommunityId;
+  navigateRoute(route);
+}
+function navigateRoute(route,{history=true,scroll=0}={}){
+  if(document.querySelector('#workEditor')){syncStudioEditor();save();}
+  if(history){
+    window.history.replaceState({route:currentRoute,scroll:window.scrollY},'',window.location.href);
+    window.history.pushState({route,scroll},'',routePath(route));
+  }
+  currentRoute=route;
+  // Cancel outstanding permalink fetches before committing another destination.
+  ++postRequest;
+  navigationTransition(()=>{
+    update(s=>{s.ui.page=route.page;s.ui.modal=null;s.ui.sidebarOpen=false;if(route.work)s.ui.selectedWorkId=route.work;if(route.community)s.ui.selectedCommunityId=route.community;},{persist:false});
+    if(route.page==='post'){permalinkPost=null;permalinkError=route.error||'';permalinkLoading=!!route.postId;}
+    render();window.scrollTo({top:scroll,left:0,behavior:'instant'});
+    if(route.page==='post'&&route.postId)void loadPermalink(route.postId);
+  });
+}
+async function loadPermalink(id,{renderAfter=true}={}){
+  const request=++postRequest;
+  permalinkLoading=true;permalinkError='';
+  try{
+    const post=await fetchPublicPost(id);
+    if(request!==postRequest)return;
+    permalinkPost=post;
+    if(post)update(s=>{s.posts=[post,...s.posts.filter(item=>item.id!==post.id)];},{persist:false});
+  }catch(error){if(request===postRequest)permalinkError=`Не удалось загрузить пост: ${error.message}`;}
+  finally{if(request===postRequest){permalinkLoading=false;if(renderAfter)render();}}
+}
+async function shareFeedPost(id){
+  const post=state.posts.find(item=>item.id===id)||(permalinkPost?.id===id?permalinkPost:null);
+  if(!post)throw new Error('Пост недоступен');
+  const outcome=await sharePost(post,{navigator,origin:window.location.origin});
+  if(outcome==='copied')notify('Ссылка скопирована');
+  if(outcome==='shared')notify('Пост отправлен');
+}
+
 function openModal(html,size){ update(s=>s.ui.modal=modal(html,size),{persist:false}); render(); }
 function closeModal(){ update(s=>s.ui.modal=null,{persist:false}); render(); }
 
+function attachBusySubmit(form,handler){
+  form.addEventListener('submit',event=>{
+    event.preventDefault();
+    const button=event.submitter||form.querySelector('button[type="submit"]');
+    void withBusy(button,()=>handler(event)).catch(error=>notify(`Не удалось выполнить запрос: ${error.message}`));
+  });
+}
+
 function attachSpecial(){
-  const reg=document.querySelector('#registrationOtpRequestForm'); if(reg) reg.addEventListener('submit',handleRegistrationOtpRequest);
-  const login=document.querySelector('#loginOtpRequestForm'); if(login) login.addEventListener('submit',handleLoginOtpRequest);
-  const verify=document.querySelector('#otpVerifyForm'); if(verify) verify.addEventListener('submit',handleOtpVerify);
+  const editorForm=document.querySelector('#workEditor');
+  if(editorForm)for(const event of ['input','change'])editorForm.addEventListener(event,e=>{
+    if(!e.target.name)return;
+    syncEditorMetadata();scheduleStudioAutosave();
+  });
+
+  const reg=document.querySelector('#registrationOtpRequestForm'); if(reg) attachBusySubmit(reg,handleRegistrationOtpRequest);
+  const login=document.querySelector('#loginOtpRequestForm'); if(login) attachBusySubmit(login,handleLoginOtpRequest);
+  const verify=document.querySelector('#otpVerifyForm'); if(verify) attachBusySubmit(verify,handleOtpVerify);
   const text=document.querySelector('#readerText');
   if(text){
     text.style.fontSize=`${readerFont}px`; text.dataset.theme=String(readerTheme); text.addEventListener('mouseup',captureSelection);
@@ -112,6 +210,7 @@ function attachSpecial(){
     if(control.type==='color') control.addEventListener('input',()=>applyEditorTool(control.dataset.editorTool,control.value));
   });
   const upload=document.querySelector('#mediaUpload'); if(upload) upload.addEventListener('change',handleMediaUpload);
+  const workForm=document.querySelector('#workEditor');if(workForm){for(const kind of ['input','change'])workForm.addEventListener(kind,event=>{if(event.target.type!=='file')scheduleStudioAutosave();});}
   const avatarUpload=document.querySelector('#profileAvatarUpload');if(avatarUpload)avatarUpload.addEventListener('change',event=>handleProfileMedia(event,'avatar'));
   const bannerUpload=document.querySelector('#profileBannerUpload');if(bannerUpload)bannerUpload.addEventListener('change',event=>handleProfileMedia(event,'banner'));
   document.querySelectorAll('[data-tag-search]').forEach(input=>input.addEventListener('input',()=>{const query=input.value.trim().toLowerCase();input.closest('.preference-selector')?.querySelectorAll('[data-tag-label]').forEach(label=>{label.hidden=!!query&&!label.dataset.tagLabel.includes(query);});}));
@@ -123,9 +222,9 @@ function attachSpecial(){
   if(widthSlider) widthSlider.addEventListener('input',()=>setMediaSize(widthSlider.value,true));
   const gapSlider=document.querySelector('#mediaGapSlider');
   if(gapSlider) gapSlider.addEventListener('input',()=>setMediaGap(gapSlider.value,true));
-  attachMediaInteractions();
-  updateMediaControls();
   attachCanvasInteractions();
+  attachEditorImageErrors();
+  for(const [id,property] of [['canvasMediaLayout','layoutMode'],['canvasMediaWrap','wrapMode'],['canvasMediaCaption','caption'],['canvasMediaAlt','alt']]){const input=document.getElementById(id);if(input)input.addEventListener('change',()=>setCanvasObjectProperty(property,input.value));}
   attachCanvasWrapProxies();
   updateCanvasInspector();
   const bgColor=document.querySelector('#pageBackgroundColor'); if(bgColor) bgColor.addEventListener('input',()=>setPageBackgroundColor(bgColor.value));
@@ -143,11 +242,41 @@ function attachSpecial(){
   attachBookSwipe();
   updateEditorWordCount();
   syncEditorToolbar();
+  updateEditorUndoControls();
 }
 
+function setStudioSaveStatus(work,status,message){
+  work.saveStatus=status;work.saveError=status==='error'?message:null;
+  const label=document.querySelector('#workEditor')?.dataset.id===work.id?document.querySelector('.word-status span:last-child'):null;
+  if(label){label.dataset.saveStatus=status;label.textContent=message;label.setAttribute('role','status');}
+}
 function scheduleStudioAutosave(){
   clearTimeout(studioAutosaveTimer);
-  studioAutosaveTimer=setTimeout(()=>{if(document.querySelector('#workEditor')){syncStudioEditor();save();const label=document.querySelector('.word-status span:last-child');if(label&&!state.ui.bookViewMode)label.dataset.saved='1';}},650);
+  studioAutosaveTimer=setTimeout(async()=>{
+    const form=document.querySelector('#workEditor');if(!form)return;
+    const work=state.works.find(item=>item.id===form.dataset.id);if(!work)return;
+    try{
+      const values=collectEditor();if(values)Object.assign(work,values);
+      await migrateLegacyWorkAssets(work);assertWorkMediaReady(work);
+      const localSaved=save();
+      if(!isCloudAuthenticated()||state.user?.role!=='author'||!state.user?.verified){setStudioSaveStatus(work,localSaved?'local':'error',localSaved?'Сохранено на этом устройстве':state.ui.localSaveError);return;}
+      setStudioSaveStatus(work,'saving','Сохранение в облако…');
+      await studioCloudWrites.run(async()=>{
+        // Read identities after earlier writes finish: a rapid first edit must not
+        // create two works/versions. Keep the local id stable while the editor is open.
+        if(work.creationType==='fragment'){
+          const result=await saveCloudFragment(structuredClone(work),{publish:work.evaluationStatus==='open'});
+          if(!result?.id)throw new Error('Сервер не подтвердил сохранение фрагмента');
+          work.fragmentCloudId=result.id;
+        }else{
+          const result=await saveCloudWork(structuredClone(work),{mode:'draft'});
+          work.cloudId=result.work.id;work.cloudVersionId=result.version.id;work.version=String(result.version.version_no);
+        }
+        save();
+      });
+      setStudioSaveStatus(work,'saved',localSaved?'Сохранено в облаке':'Сохранено в облаке; перенос других локальных черновиков ожидается');
+    }catch(error){setStudioSaveStatus(work,'error',`Не сохранено в облаке: ${error.message}`);}
+  },650);
 }
 
 function handleEditorShortcuts(e){
@@ -155,7 +284,7 @@ function handleEditorShortcuts(e){
   const k=e.key.toLowerCase();
   const map={b:'bold',i:'italic',u:'underline'};
   if(map[k]){e.preventDefault();rememberEditorSelection();execEditorCommand(map[k]);return;}
-  if(k==='s'){e.preventDefault();syncStudioEditor();save();notify('Черновик сохранён локально');}
+  if(k==='s'){e.preventDefault();saveWork('draft');}
 }
 
 function attachBookSwipe(){
@@ -165,125 +294,11 @@ function attachBookSwipe(){
   });
 }
 
-function cleanEditorHtml(el){
-  const clone=el.cloneNode(true);
-  clone.querySelectorAll('.media-drag-handle,.media-resize-handle').forEach(x=>x.remove());
-  clone.querySelectorAll('.embedded-media').forEach(x=>x.classList.remove('selected','dragging'));
-  return sanitizeHtml(clone.innerHTML);
-}
-
-function selectMediaFigure(figure){
-  document.querySelectorAll('.rich-editor .embedded-media.selected').forEach(x=>x.classList.remove('selected'));
-  selectedMediaFigure=figure||null;
-  if(figure)figure.classList.add('selected');
-  updateMediaControls();
-}
-function updateMediaControls(){
-  const width=document.querySelector('#mediaWidthSlider'),gap=document.querySelector('#mediaGapSlider');
-  if(!selectedMediaFigure){if(width)width.disabled=true;if(gap)gap.disabled=true;return;}
-  if(width){width.disabled=false;width.value=String(Math.round(parseFloat(selectedMediaFigure.style.width)||55));}
-  const g=Math.round(parseFloat(selectedMediaFigure.dataset.gap||18));if(gap){gap.disabled=false;gap.value=String(g);}
-  const wo=document.querySelector('#mediaWidthOutput');if(wo)wo.textContent=`${width?.value||55}%`;
-  const go=document.querySelector('#mediaGapOutput');if(go)go.textContent=`${g}px`;
-}
-
-function attachMediaInteractions(){
-  selectedMediaFigure=null;
-  document.querySelectorAll('.rich-editor .embedded-media').forEach(figure=>{
-    figure.setAttribute('contenteditable','false');
-    figure.setAttribute('draggable','false');
-    const img=figure.querySelector('img');
-    if(img){
-      img.setAttribute('draggable','false');
-      if(!img.dataset.dragBound){img.dataset.dragBound='1';img.addEventListener('pointerdown',startMediaDrag);}
-    }
-    if(!figure.querySelector('.media-drag-handle')){
-      const handle=document.createElement('button');
-      handle.type='button';
-      handle.className='media-drag-handle';
-      handle.textContent='⠿ Переместить';
-      handle.title='Перетащите изображение по странице';
-      handle.setAttribute('contenteditable','false');
-      figure.appendChild(handle);
-      handle.addEventListener('pointerdown',startMediaDrag);
-    }
-    if(!figure.querySelector('.media-resize-handle')){
-      const resize=document.createElement('span');resize.className='media-resize-handle';resize.title='Тяните, чтобы изменить размер';resize.setAttribute('contenteditable','false');figure.appendChild(resize);resize.addEventListener('pointerdown',startMediaResize);
-    }
-  });
-}
-
-function startMediaResize(e){
-  if(e.button!==0)return;e.preventDefault();e.stopPropagation();
-  const handle=e.currentTarget,figure=handle.closest('.embedded-media'),editor=figure?.closest('.rich-editor');if(!figure||!editor)return;
-  selectMediaFigure(figure);const rect=editor.getBoundingClientRect();
-  try{handle.setPointerCapture(e.pointerId);}catch{}
-  const move=ev=>{const fr=figure.getBoundingClientRect();const left=fr.left-rect.left;const px=Math.max(120,Math.min(rect.width-left-8,ev.clientX-fr.left));const pct=Math.max(20,Math.min(100,px/rect.width*100));figure.style.width=`${pct}%`;figure.style.maxWidth=`${pct}%`;updateMediaControls();};
-  const up=ev=>{try{handle.releasePointerCapture(ev.pointerId);}catch{}handle.removeEventListener('pointermove',move);handle.removeEventListener('pointerup',up);handle.removeEventListener('pointercancel',up);syncStudioEditor();save();};
-  handle.addEventListener('pointermove',move);handle.addEventListener('pointerup',up);handle.addEventListener('pointercancel',up);
-}
-
-function startMediaDrag(e){
-  if(e.button!==0)return;
-  e.preventDefault();e.stopPropagation();
-  const handle=e.currentTarget;
-  const figure=handle.closest('.embedded-media');
-  const editor=figure?.closest('.rich-editor');
-  if(!figure||!editor)return;
-  selectMediaFigure(figure);
-  figure.classList.add('dragging');
-  document.body.classList.add('media-is-dragging');
-  try{handle.setPointerCapture(e.pointerId);}catch{}
-
-  const move=ev=>{
-    ev.preventDefault();
-    const rect=editor.getBoundingClientRect();
-    const relX=(ev.clientX-rect.left)/Math.max(1,rect.width);
-    figure.classList.remove('wrap-left','wrap-right','wrap-wide','wrap-block');
-    if(relX<.38) figure.classList.add('wrap-left');
-    else if(relX>.62) figure.classList.add('wrap-right');
-    else figure.classList.add('wrap-block');
-
-    const siblings=[...editor.children].filter(n=>n!==figure && !n.classList?.contains('media-drag-handle'));
-    if(!siblings.length){editor.appendChild(figure);return;}
-    let target=null;
-    for(const node of siblings){
-      const r=node.getBoundingClientRect();
-      if(ev.clientY < r.top+r.height/2){target=node;break;}
-    }
-    if(target) editor.insertBefore(figure,target); else editor.appendChild(figure);
-  };
-  const up=ev=>{
-    figure.classList.remove('dragging');
-    document.body.classList.remove('media-is-dragging');
-    try{handle.releasePointerCapture(ev.pointerId);}catch{}
-    handle.removeEventListener('pointermove',move);handle.removeEventListener('pointerup',up);handle.removeEventListener('pointercancel',up);
-    syncStudioEditor();save();rememberEditorSelection();
-  };
-  handle.addEventListener('pointermove',move);
-  handle.addEventListener('pointerup',up);
-  handle.addEventListener('pointercancel',up);
-}
-
-function setMediaSize(percent,live=false){
-  if(!selectedMediaFigure){if(!live)notify('Сначала выберите картинку на странице');return;}
-  const value=Math.max(20,Math.min(100,Number(percent)||55));
-  selectedMediaFigure.style.width=value+'%';selectedMediaFigure.style.maxWidth=value+'%';
-  const out=document.querySelector('#mediaWidthOutput');if(out)out.textContent=`${Math.round(value)}%`;
-  if(!live){syncStudioEditor();save();}else scheduleStudioAutosave();
-}
-function setMediaGap(px,live=false){
-  if(!selectedMediaFigure){if(!live)notify('Сначала выберите картинку');return;}
-  const value=Math.max(0,Math.min(48,Number(px)||0));selectedMediaFigure.dataset.gap=String(value);selectedMediaFigure.style.setProperty('--media-gap',`${value}px`);const out=document.querySelector('#mediaGapOutput');if(out)out.textContent=`${value}px`;if(live)scheduleStudioAutosave();else{syncStudioEditor();save();}
-}
-function toggleMediaCaption(){
-  if(!selectedMediaFigure){notify('Сначала выберите картинку');return;}
-  let cap=selectedMediaFigure.querySelector('figcaption');if(cap){cap.remove();}else{cap=document.createElement('figcaption');cap.textContent=selectedMediaFigure.querySelector('img')?.alt||'Иллюстрация';selectedMediaFigure.appendChild(cap);}syncStudioEditor();save();
-}
-function resetMediaPosition(){
-  if(!selectedMediaFigure){notify('Сначала выберите картинку');return;}
-  selectedMediaFigure.classList.remove('wrap-left','wrap-right','wrap-wide');selectedMediaFigure.classList.add('wrap-block');selectedMediaFigure.style.width='55%';selectedMediaFigure.style.maxWidth='55%';setMediaGap(18,true);updateMediaControls();syncStudioEditor();save();
-}
+// Legacy toolbar actions delegate to the shared structured media editor.
+function setMediaSize(percent){if(!selectedCanvasObject)return;const width=Math.max(60,Math.min(616,Number(percent)*6.16));setCanvasObjectProperty('width',width);}
+function setMediaGap(value){setCanvasObjectProperty('gap',value);}
+function toggleMediaCaption(){if(!selectedCanvasObject)return;const value=prompt('Подпись изображения',selectedCanvasObject.dataset.caption||'');if(value!==null)setCanvasObjectProperty('caption',value);}
+function resetMediaPosition(){setCanvasObjectProperty('layoutMode','flow');setCanvasObjectProperty('wrapMode','center');}
 
 function makeCanvasPage(type='content',title='Без названия',author=''){
   const id=Date.now()+Math.random().toString(36).slice(2,6);
@@ -299,13 +314,12 @@ function makeCanvasPage(type='content',title='Без названия',author=''
   return {id:`page-${id}`,type:'content',label:'Страница',html:'<p><br></p>',canvas:{background:{color:'#f7f1e5',image:'',fit:'cover',position:'center'},textColor:'#191715',objects:[{id:`flow-${id}`,type:'text',role:'body',x:72,y:72,w:616,h:936,z:1,rotation:0,html:'<p><br></p>',flow:true,locked:false,style:{fontFamily:'Georgia',fontSize:18,lineHeight:1.55,color:null,align:'left',background:'transparent',padding:6}}]}};
 }
 function currentCanvasState(){
-  const form=document.querySelector('#workEditor'); if(!form)return null;
-  const w=state.works.find(x=>x.id===form.dataset.id); if(!w||w.editorMode!=='book')return null;
-  const idx=Math.max(0,Math.min((w.bookPages||[]).length-1,state.ui.bookPageIndex||0));
-  const page=w.bookPages?.[idx]; if(!page)return null;
-  page.canvas=page.canvas||{background:{color:page.type==='cover'?'#101d2d':'#f7f1e5',image:page.image||'',fit:'cover',position:'center'},textColor:page.type==='cover'?'#ffffff':'#191715',objects:[]};
-  page.canvas.background=page.canvas.background||{color:'#f7f1e5',image:'',fit:'cover',position:'center'};
-  page.canvas.objects=Array.isArray(page.canvas.objects)?page.canvas.objects:[];
+  const form=document.querySelector('#workEditor');if(!form)return null;
+  const w=state.works.find(x=>x.id===form.dataset.id);if(!w)return null;
+  const pages=w.editorMode==='book'?w.bookPages:w.documentPages;
+  const field=w.editorMode==='book'?'bookPageIndex':'documentPageIndex';
+  const idx=Math.max(0,Math.min((pages||[]).length-1,state.ui[field]||0));
+  const page=pages?.[idx];if(!page)return null;ensureStructuredPage(page);
   return {form,w,page,idx,canvas:page.canvas};
 }
 function canvasPercent(v,total){return `${(Number(v||0)/total*100).toFixed(4)}%`;}
@@ -322,7 +336,7 @@ function serializeCanvasObject(obj,old={}){
   const base={...old,id:obj.dataset.objectId,type:obj.dataset.objectType||old.type||'text',x:Number(obj.dataset.x)||0,y:Number(obj.dataset.y)||0,w:Number(obj.dataset.w)||100,h:Number(obj.dataset.h)||100,z:Number(obj.dataset.z)||1,rotation:Number(obj.dataset.rotation)||0,locked:obj.dataset.locked==='1'};
   if(base.type==='image'){
     const img=obj.querySelector('img');
-    return {...base,assetId:old.assetId||'',storagePath:old.storagePath||'',src:img?.getAttribute('src')||old.src||'',alt:img?.getAttribute('alt')||old.alt||'',fit:obj.dataset.fit||old.fit||'cover',radius:Number(obj.dataset.radius)||0,opacity:obj.dataset.opacity==null?(old.opacity??1):Number(obj.dataset.opacity),wrap:obj.dataset.wrap||old.wrap||'auto',gap:Number(obj.dataset.gap)||14};
+    return normalizeMediaObject({...base,width:base.w,height:base.h,zIndex:base.z,assetId:old.assetId||obj.dataset.assetId||'',storagePath:old.storagePath||obj.dataset.assetPath||'',url:obj.dataset.mediaUrl||img?.getAttribute('src')||old.url||old.src||'',alt:img?.getAttribute('alt')||old.alt||'',caption:obj.dataset.caption||'',layoutMode:obj.dataset.layoutMode||old.layoutMode||'free',wrapMode:obj.dataset.wrapMode||old.wrapMode||'left',fit:obj.dataset.fit||old.fit||'cover',radius:Number(obj.dataset.radius)||0,opacity:obj.dataset.opacity==null?(old.opacity??1):Number(obj.dataset.opacity),wrap:obj.dataset.wrap||old.wrap||'auto',gap:obj.dataset.gap==null?14:Number(obj.dataset.gap)},{pageId:currentCanvasState()?.page.id,allowEmbedded:true});
   }
   const content=obj.querySelector('.canvas-text-content');
   return {...base,html:content?cleanCanvasTextHtml(content):(old.html||'<p><br></p>'),flow:obj.dataset.flow!=='0',role:obj.dataset.role||old.role||'',style:{...(old.style||{}),fontFamily:obj.dataset.fontFamily||old.style?.fontFamily||'Georgia',fontSize:Number(obj.dataset.fontSize)||old.style?.fontSize||18,lineHeight:Number(obj.dataset.lineHeight)||old.style?.lineHeight||1.55,color:obj.dataset.baseColor||old.style?.color||null,align:obj.dataset.align||old.style?.align||'left',background:obj.dataset.bg||old.style?.background||'transparent',padding:Number(obj.dataset.padding)||old.style?.padding||6}};
@@ -333,6 +347,7 @@ function syncCanvasDomToState(){
   ctx.canvas.objects=[...canvasEl.querySelectorAll(':scope > .canvas-object')].map(el=>serializeCanvasObject(el,old.get(el.dataset.objectId)||{}));
   ctx.canvas.background={...(ctx.canvas.background||{}),color:canvasEl.dataset.bgColor||ctx.canvas.background?.color||'#f7f1e5',image:canvasEl.dataset.bgImage||'',fit:canvasEl.dataset.bgFit||'cover',position:'center'};
   ctx.canvas.textColor=canvasEl.dataset.textColor||ctx.canvas.textColor||'#191715';
+  if(ctx.w.editorMode!=='book')ctx.page.html=ctx.canvas.objects.filter(object=>object.type==='text').map(object=>object.html||'').join('');
   const roleText={};for(const o of ctx.canvas.objects){if(o.type==='text'&&o.role){const d=document.createElement('div');d.innerHTML=o.html||'';roleText[o.role]=(d.innerText||'').trim();}}
   if(roleText.title){ctx.page.title=roleText.title;ctx.w.title=roleText.title;const titleInput=ctx.form.elements?.title;if(titleInput)titleInput.value=roleText.title;}
   if(roleText.subtitle!=null)ctx.page.subtitle=roleText.subtitle;
@@ -361,6 +376,7 @@ function updateCanvasInspector(){
     const op=document.querySelector('#canvasOpacitySlider'),oo=document.querySelector('#canvasOpacityOutput');const opacity=Math.round((Number(obj.dataset.opacity)||1)*100);if(op)op.value=String(opacity);if(oo)oo.textContent=`${opacity}%`;
     const rad=document.querySelector('#canvasRadiusSlider'),rout=document.querySelector('#canvasRadiusOutput');if(rad)rad.value=String(Number(obj.dataset.radius)||0);if(rout)rout.textContent=`${Number(obj.dataset.radius)||0}px`;
     const fit=document.querySelector('#canvasImageFit');if(fit)fit.value=obj.dataset.fit||'cover';
+    for(const [id,key] of [['canvasMediaLayout','layoutMode'],['canvasMediaWrap','wrapMode'],['canvasMediaCaption','caption'],['canvasMediaAlt','alt']]){const input=document.getElementById(id);if(input)input.value=obj.dataset[key]||'';}
     const wrap=document.querySelector('#canvasImageWrap');if(wrap)wrap.value=obj.dataset.wrap||'auto';
     const gap=document.querySelector('#canvasWrapGapSlider'),go=document.querySelector('#canvasWrapGapOutput');if(gap)gap.value=String(Number(obj.dataset.gap)||14);if(go)go.textContent=`${Number(obj.dataset.gap)||14}px`;
   }else{
@@ -378,21 +394,22 @@ function showCanvasGuides(canvas,obj){
 }
 function clearCanvasGuides(canvas){canvas?.classList.remove('show-guide-v','show-guide-h');}
 function finishCanvasObjectGesture(obj,canvas){
+  if(obj?.dataset.objectType==='image'&&obj.dataset.layoutMode==='flow'){const media=applyMediaLayout(serializeCanvasObject(obj),'flow',obj.dataset.wrapMode);for(const [key,value] of Object.entries({x:media.x,y:media.y,w:media.width,h:media.height}))obj.dataset[key]=String(value);applyCanvasObjectGeometry(obj);}
   obj?.classList.remove('is-dragging','is-resizing','is-rotating');clearCanvasGuides(canvas);syncCanvasDomToState();editorRoot.commit();save();attachCanvasWrapProxies();updateCanvasInspector();
 }
 function startCanvasDrag(e,obj){
-  if(!obj||obj.dataset.locked==='1'||e.button!==0)return;e.preventDefault();e.stopPropagation();editorRoot.begin('move');
+  if(!obj||obj.dataset.locked==='1'||e.button!==0)return;e.preventDefault();e.stopPropagation();editorRoot.begin('move');if(obj.dataset.objectType==='image')obj.dataset.layoutMode='free';
   const canvas=obj.closest('#freePageCanvas');if(!canvas)return;selectCanvasObject(obj);obj.classList.add('is-dragging');
   const start=canvasPointerToUnits(canvas,e.clientX,e.clientY),ox=Number(obj.dataset.x)||0,oy=Number(obj.dataset.y)||0,w=Number(obj.dataset.w)||100,h=Number(obj.dataset.h)||100;
   const target=e.currentTarget;try{target.setPointerCapture(e.pointerId);}catch{}
-  const move=ev=>{const pt=canvasPointerToUnits(canvas,ev.clientX,ev.clientY);let x=clampCanvas(ox+pt.x-start.x,0,PAGE_CANVAS_W-w),y=clampCanvas(oy+pt.y-start.y,0,PAGE_CANVAS_H-h);if(state.ui.studioGrid&&!ev.altKey){x=Math.round(x/10)*10;y=Math.round(y/10)*10;}obj.dataset.x=String(x);obj.dataset.y=String(y);const guides=showCanvasGuides(canvas,obj);if(guides.v&&!ev.altKey)obj.dataset.x=String(PAGE_CANVAS_W/2-w/2);if(guides.hy&&!ev.altKey)obj.dataset.y=String(PAGE_CANVAS_H/2-h/2);applyCanvasObjectGeometry(obj);attachCanvasWrapProxies();};
+  const move=ev=>{const pt=canvasPointerToUnits(canvas,ev.clientX,ev.clientY);let x=clampCanvas(ox+pt.x-start.x,0,PAGE_CANVAS_W-w),y=clampCanvas(oy+pt.y-start.y,0,PAGE_CANVAS_H-h);if(state.ui.studioGrid&&!ev.altKey){x=Math.round(x/10)*10;y=Math.round(y/10)*10;}obj.dataset.x=String(x);obj.dataset.y=String(y);const guides=showCanvasGuides(canvas,obj);if(guides.vx&&!ev.altKey)obj.dataset.x=String(PAGE_CANVAS_W/2-w/2);if(guides.hy&&!ev.altKey)obj.dataset.y=String(PAGE_CANVAS_H/2-h/2);applyCanvasObjectGeometry(obj);attachCanvasWrapProxies();};
   const up=ev=>{try{target.releasePointerCapture(ev.pointerId);}catch{}target.removeEventListener('pointermove',move);target.removeEventListener('pointerup',up);target.removeEventListener('pointercancel',up);finishCanvasObjectGesture(obj,canvas);};
   target.addEventListener('pointermove',move);target.addEventListener('pointerup',up);target.addEventListener('pointercancel',up);
 }
 function startCanvasResize(e,obj,dir){
   if(!obj||obj.dataset.locked==='1'||e.button!==0)return;e.preventDefault();e.stopPropagation();editorRoot.begin('resize');const canvas=obj.closest('#freePageCanvas');if(!canvas)return;selectCanvasObject(obj);obj.classList.add('is-resizing');
   const start=canvasPointerToUnits(canvas,e.clientX,e.clientY),ox=Number(obj.dataset.x)||0,oy=Number(obj.dataset.y)||0,ow=Number(obj.dataset.w)||100,oh=Number(obj.dataset.h)||100,ratio=ow/Math.max(1,oh),isImage=obj.dataset.objectType==='image';const target=e.currentTarget;try{target.setPointerCapture(e.pointerId);}catch{}
-  const move=ev=>{const pt=canvasPointerToUnits(canvas,ev.clientX,ev.clientY);let dx=pt.x-start.x,dy=pt.y-start.y,x=ox,y=oy,w=ow,h=oh;const minW=isImage?60:90,minH=isImage?50:48;if(dir.includes('e'))w=Math.max(minW,ow+dx);if(dir.includes('s'))h=Math.max(minH,oh+dy);if(dir.includes('w')){w=Math.max(minW,ow-dx);x=ox+(ow-w);}if(dir.includes('n')){h=Math.max(minH,oh-dy);y=oy+(oh-h);}if(isImage&&!ev.shiftKey&&dir.length===2){if(Math.abs(dx)>Math.abs(dy)){h=w/ratio;if(dir.includes('n'))y=oy+oh-h;}else{w=h*ratio;if(dir.includes('w'))x=ox+ow-w;}}w=Math.min(w,PAGE_CANVAS_W-x);h=Math.min(h,PAGE_CANVAS_H-y);x=clampCanvas(x,0,PAGE_CANVAS_W-w);y=clampCanvas(y,0,PAGE_CANVAS_H-h);obj.dataset.x=String(x);obj.dataset.y=String(y);obj.dataset.w=String(w);obj.dataset.h=String(h);applyCanvasObjectGeometry(obj);attachCanvasWrapProxies();};
+  const move=ev=>{const pt=canvasPointerToUnits(canvas,ev.clientX,ev.clientY);let dx=pt.x-start.x,dy=pt.y-start.y,x=ox,y=oy,w=ow,h=oh;const minW=isImage?60:90,minH=isImage?50:48;if(dir.includes('e'))w=Math.max(minW,ow+dx);if(dir.includes('s'))h=Math.max(minH,oh+dy);if(dir.includes('w')){w=Math.max(minW,ow-dx);x=ox+(ow-w);}if(dir.includes('n')){h=Math.max(minH,oh-dy);y=oy+(oh-h);}if(isImage&&!ev.shiftKey&&dir.length===2){if(Math.abs(dx)>Math.abs(dy)){h=w/ratio;if(dir.includes('n'))y=oy+oh-h;}else{w=h*ratio;if(dir.includes('w'))x=ox+ow-w;}}w=Math.min(w,PAGE_CANVAS_W);h=Math.min(h,PAGE_CANVAS_H);x=clampCanvas(x,0,PAGE_CANVAS_W-w);y=clampCanvas(y,0,PAGE_CANVAS_H-h);obj.dataset.x=String(x);obj.dataset.y=String(y);obj.dataset.w=String(w);obj.dataset.h=String(h);applyCanvasObjectGeometry(obj);attachCanvasWrapProxies();};
   const up=ev=>{try{target.releasePointerCapture(ev.pointerId);}catch{}target.removeEventListener('pointermove',move);target.removeEventListener('pointerup',up);target.removeEventListener('pointercancel',up);finishCanvasObjectGesture(obj,canvas);};target.addEventListener('pointermove',move);target.addEventListener('pointerup',up);target.addEventListener('pointercancel',up);
 }
 function startCanvasRotate(e,obj){
@@ -419,11 +436,11 @@ function attachCanvasInteractions(){
   canvas.addEventListener('drop',handleCanvasImageDrop);
   canvas.addEventListener('paste',handleCanvasImagePaste);
   canvas.querySelectorAll(':scope > .canvas-object').forEach(obj=>{
-    addCanvasChrome(obj);obj.addEventListener('pointerdown',e=>{selectCanvasObject(obj);if(obj.dataset.objectType==='image'&&!e.target.closest('.canvas-object-chrome')&&obj.dataset.locked!=='1')startCanvasDrag(e,obj);},true);
-    const content=obj.querySelector('.canvas-text-content');if(content){content.addEventListener('focus',()=>selectCanvasObject(obj));content.addEventListener('input',()=>{autoGrowCanvasText(content);scheduleStudioAutosave();attachCanvasWrapProxies();});}
+    addCanvasChrome(obj);obj.addEventListener('pointerdown',e=>{if(e.target.closest('button,input,select,textarea,a'))return;selectCanvasObject(obj);if(obj.dataset.objectType==='image'&&!e.target.closest('.canvas-object-chrome')&&obj.dataset.locked!=='1')startCanvasDrag(e,obj);},true);
+    const content=obj.querySelector('.canvas-text-content');if(content){content.addEventListener('focus',()=>selectCanvasObject(obj));content.addEventListener('beforeinput',()=>{syncCanvasDomToState();editorRoot.begin('edit text');});content.addEventListener('input',()=>{autoGrowCanvasText(content);syncCanvasDomToState();editorRoot.commit();scheduleStudioAutosave();attachCanvasWrapProxies();});}
   });
   const wanted=state.ui.canvasSelectedObjectId;const target=wanted?canvas.querySelector(`[data-object-id="${CSS.escape(wanted)}"]`):null;if(target)selectCanvasObject(target);
-  if(!document.body.dataset.canvasKeysBound){document.body.dataset.canvasKeysBound='1';document.addEventListener('keydown',e=>{const obj=selectedCanvasObject;if(!obj||!document.body.contains(obj))return;const inText=e.target.closest?.('.canvas-text-content,input,textarea,select');if(inText)return;if((e.key==='Delete'||e.key==='Backspace')){e.preventDefault();deleteSelectedCanvasObject();return;}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='d'){e.preventDefault();duplicateSelectedCanvasObject();return;}if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)&&obj.dataset.locked!=='1'){e.preventDefault();const step=e.shiftKey?10:1;let x=Number(obj.dataset.x)||0,y=Number(obj.dataset.y)||0,w=Number(obj.dataset.w)||100,h=Number(obj.dataset.h)||100;if(e.key==='ArrowLeft')x-=step;if(e.key==='ArrowRight')x+=step;if(e.key==='ArrowUp')y-=step;if(e.key==='ArrowDown')y+=step;obj.dataset.x=String(clampCanvas(x,0,PAGE_CANVAS_W-w));obj.dataset.y=String(clampCanvas(y,0,PAGE_CANVAS_H-h));applyCanvasObjectGeometry(obj);syncCanvasDomToState();scheduleStudioAutosave();attachCanvasWrapProxies();}if(e.key==='Escape')selectCanvasObject(null);});}
+  if(!document.body.dataset.canvasKeysBound){document.body.dataset.canvasKeysBound='1';document.addEventListener('keydown',e=>{const obj=selectedCanvasObject;if(!obj||!document.body.contains(obj))return;const inText=e.target.closest?.('.canvas-text-content,input,textarea,select');if(inText)return;if((e.key==='Delete'||e.key==='Backspace')){e.preventDefault();deleteSelectedCanvasObject();return;}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='d'){e.preventDefault();duplicateSelectedCanvasObject();return;}if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)&&obj.dataset.locked!=='1'){e.preventDefault();editorRoot.begin('nudge');const step=e.shiftKey?10:1;let x=Number(obj.dataset.x)||0,y=Number(obj.dataset.y)||0,w=Number(obj.dataset.w)||100,h=Number(obj.dataset.h)||100;if(e.key==='ArrowLeft')x-=step;if(e.key==='ArrowRight')x+=step;if(e.key==='ArrowUp')y-=step;if(e.key==='ArrowDown')y+=step;obj.dataset.x=String(clampCanvas(x,0,PAGE_CANVAS_W-w));obj.dataset.y=String(clampCanvas(y,0,PAGE_CANVAS_H-h));applyCanvasObjectGeometry(obj);syncCanvasDomToState();editorRoot.commit();scheduleStudioAutosave();attachCanvasWrapProxies();}if(e.key==='Escape')selectCanvasObject(null);});}
 }
 async function handleCanvasImageDrop(e){
   const canvas=e.currentTarget;canvas.classList.remove('is-file-over');const file=[...e.dataTransfer?.files||[]].find(f=>f.type?.startsWith('image/'));if(!file)return;e.preventDefault();
@@ -437,15 +454,39 @@ async function handleCanvasImagePaste(e){
 function addCanvasTextObject(kind='text',x=100,y=120){
   const ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();editorRoot.begin('create text');const id=`text-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,note=kind==='note';const z=Math.max(0,...ctx.canvas.objects.map(o=>Number(o.z)||0))+1;ctx.canvas.objects.push({id,type:'text',x:clampCanvas(x,0,PAGE_CANVAS_W-260),y:clampCanvas(y,0,PAGE_CANVAS_H-120),w:note?300:360,h:note?180:150,z,rotation:0,html:note?'<p>Новая заметка</p>':'<p>Введите текст…</p>',flow:!note,locked:false,style:{fontFamily:'Georgia',fontSize:note?20:18,lineHeight:1.45,color:note?'#34230f':null,align:'left',background:note?'#fff1a8':'transparent',padding:note?18:8}});update(s=>s.ui.canvasSelectedObjectId=id,{persist:false});editorRoot.commit();save();render();requestAnimationFrame(()=>{const el=document.querySelector(`[data-object-id="${CSS.escape(id)}"] .canvas-text-content`);if(el){el.focus();const sel=getSelection();sel?.selectAllChildren(el);}});
 }
+async function migrateLegacyWorkAssets(work){
+  const changed=await migrateEmbeddedWorkAssets(work,file=>workAssets.uploadImage(file,{workId:String(work.cloudId||work.id||'draft').replace(/^cloud:/,'')}));
+  if(changed&&document.querySelector('#workEditor')?.dataset.id===work.id)render();
+  return changed;
+}
 function addCanvasImageObject(src,name,x=220,y=220,asset={}){
-  const ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();editorRoot.begin('create image');const id=`image-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,z=Math.max(0,...ctx.canvas.objects.map(o=>Number(o.z)||0))+1;ctx.canvas.objects.push({id,type:'image',x:clampCanvas(x,0,PAGE_CANVAS_W-280),y:clampCanvas(y,0,PAGE_CANVAS_H-220),w:280,h:220,z,rotation:0,assetId:asset.assetId||'',storagePath:asset.storagePath||'',src:String(src||''),alt:String(name||'Фото'),fit:'cover',radius:0,opacity:1,wrap:'auto',gap:14,locked:false});update(s=>s.ui.canvasSelectedObjectId=id,{persist:false});editorRoot.commit();save();render();
+  const ctx=currentCanvasState();if(!ctx)return;permanentMediaUrl(src);syncCanvasDomToState();editorRoot.begin('create image');
+  const stored=(ctx.w.mediaLibrary||[]).find(item=>(item.url||item.src)===src)||asset;
+  const id=`image-${crypto.randomUUID()}`,z=Math.max(0,...ctx.canvas.objects.map(o=>Number(o.z)||0))+1;
+  let media=normalizeMediaObject({id,type:'image',x,y,w:280,h:220,z,assetId:stored.assetId||'',storagePath:stored.storagePath||'',url:String(src||''),alt:String(name||'Фото'),caption:'',fit:'cover',radius:0,opacity:1,layoutMode:ctx.w.editorMode==='book'?'free':'flow',wrapMode:'left',gap:14,locked:false},{pageId:ctx.page.id});
+  media=applyMediaLayout(media,media.layoutMode,media.wrapMode);ctx.canvas.objects.push(media);
+  update(s=>s.ui.canvasSelectedObjectId=id,{persist:false});editorRoot.commit();save();render();
+}
+function attachEditorImageErrors(){
+  document.querySelectorAll('.structured-media > img').forEach(img=>{
+    const show=()=>{const parent=img.closest('.structured-media');parent?.classList.add('has-media-error');const error=parent?.querySelector('.media-load-error');if(error)error.hidden=false;};
+    img.addEventListener('error',show);img.addEventListener('load',()=>{const parent=img.closest('.structured-media');parent?.classList.remove('has-media-error');const error=parent?.querySelector('.media-load-error');if(error)error.hidden=true;});
+    if(img.complete&&!img.naturalWidth)show();
+  });
 }
 function deleteSelectedCanvasObject(){if(!selectedCanvasObject)return;const id=selectedCanvasObject.dataset.objectId,ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();editorRoot.begin('delete');ctx.canvas.objects=ctx.canvas.objects.filter(o=>o.id!==id);update(s=>s.ui.canvasSelectedObjectId=null,{persist:false});selectedCanvasObject=null;editorRoot.commit();save();render();}
 function duplicateSelectedCanvasObject(){if(!selectedCanvasObject)return;const id=selectedCanvasObject.dataset.objectId,ctx=currentCanvasState();if(!ctx)return;syncCanvasDomToState();editorRoot.begin('duplicate');const source=ctx.canvas.objects.find(o=>o.id===id);if(!source)return;const clone=structuredClone(source);clone.id=`${source.type}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;clone.x=clampCanvas((source.x||0)+28,0,PAGE_CANVAS_W-(source.w||100));clone.y=clampCanvas((source.y||0)+28,0,PAGE_CANVAS_H-(source.h||100));clone.z=Math.max(0,...ctx.canvas.objects.map(o=>Number(o.z)||0))+1;ctx.canvas.objects.push(clone);update(s=>s.ui.canvasSelectedObjectId=clone.id,{persist:false});editorRoot.commit();save();render();}
 function setCanvasLayer(mode){if(!selectedCanvasObject)return;editorRoot.begin('layer');const canvas=selectedCanvasObject.closest('#freePageCanvas');if(!canvas)return;const objects=[...canvas.querySelectorAll(':scope > .canvas-object')].sort((a,b)=>(Number(a.dataset.z)||0)-(Number(b.dataset.z)||0));let i=objects.indexOf(selectedCanvasObject);if(i<0)return;let j=i;if(mode==='front')j=objects.length-1;else if(mode==='back')j=0;else if(mode==='forward')j=Math.min(objects.length-1,i+1);else if(mode==='backward')j=Math.max(0,i-1);objects.splice(i,1);objects.splice(j,0,selectedCanvasObject);objects.forEach((o,k)=>{o.dataset.z=String(k+1);o.style.zIndex=String(k+1);});syncCanvasDomToState();editorRoot.commit();save();}
-function toggleCanvasLock(){if(!selectedCanvasObject)return;selectedCanvasObject.dataset.locked=selectedCanvasObject.dataset.locked==='1'?'0':'1';selectedCanvasObject.classList.toggle('is-locked',selectedCanvasObject.dataset.locked==='1');syncCanvasDomToState();save();updateCanvasInspector();}
+function toggleCanvasLock(){if(!selectedCanvasObject)return;editorRoot.begin('lock');selectedCanvasObject.dataset.locked=selectedCanvasObject.dataset.locked==='1'?'0':'1';selectedCanvasObject.classList.toggle('is-locked',selectedCanvasObject.dataset.locked==='1');syncCanvasDomToState();editorRoot.commit();save();updateCanvasInspector();}
 function setCanvasObjectProperty(prop,value,live=false){
-  const obj=selectedCanvasObject;if(!obj)return;const img=obj.querySelector('img');
+  const obj=selectedCanvasObject;if(!obj)return;editorRoot.begin(`image ${prop}`);const img=obj.querySelector('img');
+  if(obj.dataset.objectType==='image'&&['layoutMode','wrapMode','width'].includes(prop)){
+    const ctx=currentCanvasState();const old=ctx?.canvas.objects.find(o=>o.id===obj.dataset.objectId)||{};
+    const media=applyMediaLayout({...serializeCanvasObject(obj,old),...(prop==='width'?{width:Number(value),w:Number(value)}:{})},prop==='layoutMode'?value:obj.dataset.layoutMode,prop==='wrapMode'?value:obj.dataset.wrapMode);
+    for(const [key,val] of Object.entries({x:media.x,y:media.y,w:media.width,h:media.height,layoutMode:media.layoutMode,wrapMode:media.wrapMode,wrap:media.wrap}))obj.dataset[key]=String(val);applyCanvasObjectGeometry(obj);attachCanvasWrapProxies();updateCanvasInspector();
+  }
+  if(prop==='caption'){obj.dataset.caption=String(value);let cap=obj.querySelector('.media-object-caption');if(!cap){cap=document.createElement('span');cap.className='media-object-caption';obj.appendChild(cap);}cap.textContent=String(value);}
+  if(prop==='alt'&&img)img.alt=String(value);
   if(prop==='rotation'){obj.dataset.rotation=String(Number(value)||0);applyCanvasObjectGeometry(obj);const o=document.querySelector('#canvasRotationOutput');if(o)o.textContent=`${Math.round(Number(value)||0)}°`;}
   if(obj.dataset.objectType==='image'){
     if(prop==='opacity'){obj.dataset.opacity=String(value);if(img)img.style.opacity=String(value);const o=document.querySelector('#canvasOpacityOutput');if(o)o.textContent=`${Math.round(Number(value)*100)}%`;}
@@ -459,15 +500,15 @@ function setCanvasObjectProperty(prop,value,live=false){
     if(prop==='textBgMode'){if(String(value)==='transparent'){obj.dataset.bg='transparent';if(content)content.style.background='transparent';}else{const c=document.querySelector('#canvasTextBgColor')?.value||'#fff1a8';obj.dataset.bg=c;if(content)content.style.background=c;}}
     if(prop==='flow'){obj.dataset.flow=String(value)==='0'?'0':'1';attachCanvasWrapProxies();}
   }
-  syncCanvasDomToState();if(live)scheduleStudioAutosave();else save();
+  syncCanvasDomToState();editorRoot.commit();if(live)scheduleStudioAutosave();else{save();scheduleStudioAutosave();}
 }
 function applyCanvasBackgroundDom(){
   const ctx=currentCanvasState(),canvas=document.querySelector('#freePageCanvas');if(!ctx||!canvas)return;const bg=ctx.canvas.background||{};canvas.dataset.bgColor=bg.color||'#f7f1e5';canvas.dataset.bgImage=bg.image||'';canvas.dataset.bgFit=bg.fit||'cover';canvas.dataset.textColor=ctx.canvas.textColor||'#191715';canvas.style.backgroundColor=bg.color||'#f7f1e5';let im=canvas.querySelector(':scope > .page-background-image');if(bg.image){if(!im){im=document.createElement('img');im.className='page-background-image';im.alt='';im.draggable=false;canvas.prepend(im);}im.src=bg.image;im.style.objectFit=bg.fit||'cover';}else im?.remove();canvas.querySelectorAll('.canvas-text-object').forEach(o=>{const content=o.querySelector('.canvas-text-content');if(content&&!o.dataset.baseColor)content.style.color=ctx.canvas.textColor||'#191715';});
 }
-function setPageBackgroundColor(color){const ctx=currentCanvasState();if(!ctx)return;ctx.canvas.background.color=String(color);applyCanvasBackgroundDom();scheduleStudioAutosave();}
-function setPageTextColor(color){const ctx=currentCanvasState();if(!ctx)return;ctx.canvas.textColor=String(color);applyCanvasBackgroundDom();scheduleStudioAutosave();}
-function setPageBackgroundFit(fit){const ctx=currentCanvasState();if(!ctx)return;ctx.canvas.background.fit=fit==='contain'?'contain':'cover';applyCanvasBackgroundDom();scheduleStudioAutosave();}
-function setPageBackgroundImage(src){const ctx=currentCanvasState();if(!ctx)return;editorRoot.begin('background');ctx.canvas.background.image=String(src||'');editorRoot.commit();applyCanvasBackgroundDom();save();}
+function setPageBackgroundColor(color){const ctx=currentCanvasState();if(!ctx)return;editorRoot.begin('page background');ctx.canvas.background.color=String(color);editorRoot.commit();applyCanvasBackgroundDom();scheduleStudioAutosave();}
+function setPageTextColor(color){const ctx=currentCanvasState();if(!ctx)return;editorRoot.begin('page text color');ctx.canvas.textColor=String(color);editorRoot.commit();applyCanvasBackgroundDom();scheduleStudioAutosave();}
+function setPageBackgroundFit(fit){const ctx=currentCanvasState();if(!ctx)return;editorRoot.begin('page background fit');ctx.canvas.background.fit=fit==='contain'?'contain':'cover';editorRoot.commit();applyCanvasBackgroundDom();scheduleStudioAutosave();}
+function setPageBackgroundImage(src){const ctx=currentCanvasState();if(!ctx)return;permanentMediaUrl(src);editorRoot.begin('background');ctx.canvas.background.image=String(src||'');editorRoot.commit();applyCanvasBackgroundDom();save();}
 function clearPageBackgroundImage(){setPageBackgroundImage('');}
 function mergeBands(bands){const sorted=bands.filter(b=>b.end>b.start).sort((a,b)=>a.start-b.start),out=[];for(const b of sorted){const last=out.at(-1);if(last&&b.start<=last.end)last.end=Math.max(last.end,b.end);else out.push({...b});}return out;}
 function exclusionGradient(bands,height){const m=mergeBands(bands);if(!m.length)return 'none';const stops=['transparent 0%'];for(const b of m){const a=clampCanvas(b.start/height*100,0,100),z=clampCanvas(b.end/height*100,0,100);stops.push(`transparent ${a.toFixed(2)}%`,`rgba(0,0,0,1) ${a.toFixed(2)}%`,`rgba(0,0,0,1) ${z.toFixed(2)}%`,`transparent ${z.toFixed(2)}%`);}stops.push('transparent 100%');return `linear-gradient(to bottom,${stops.join(',')})`;}
@@ -477,7 +518,7 @@ function attachCanvasWrapProxies(){
     const images=[...canvas.querySelectorAll(':scope > .canvas-image-object[data-wrap="auto"]')];if(!images.length)return;
     for(const textObj of canvas.querySelectorAll(':scope > .canvas-text-object[data-flow="1"]')){
       const content=textObj.querySelector('.canvas-text-content');if(!content||Math.abs(Number(textObj.dataset.rotation)||0)>1)continue;const tr=textObj.getBoundingClientRect();if(tr.width<20||tr.height<20)continue;const left=[],right=[];
-      for(const image of images){const ir=image.getBoundingClientRect();const ix=Math.max(ir.left,tr.left),iy=Math.max(ir.top,tr.top),rx=Math.min(ir.right,tr.right),by=Math.min(ir.bottom,tr.bottom);if(rx<=ix||by<=iy)continue;const gap=(Number(image.dataset.gap)||14)*(tr.width/PAGE_CANVAS_W);const center=(ir.left+ir.right)/2;const side=center<tr.left+tr.width/2?'left':'right';const band={start:Math.max(0,iy-tr.top-gap),end:Math.min(tr.height,by-tr.top+gap),width:side==='left'?Math.min(tr.width,rx-tr.left+gap):Math.min(tr.width,tr.right-ix+gap)};(side==='left'?left:right).push(band);}
+      for(const image of images){const ir=image.getBoundingClientRect();const ix=Math.max(ir.left,tr.left),iy=Math.max(ir.top,tr.top),rx=Math.min(ir.right,tr.right),by=Math.min(ir.bottom,tr.bottom);if(rx<=ix||by<=iy)continue;const gap=(image.dataset.gap==null?14:Number(image.dataset.gap))*(tr.width/PAGE_CANVAS_W);const center=(ir.left+ir.right)/2;const block=image.dataset.layoutMode==='flow'&&['center','wide'].includes(image.dataset.wrapMode);const side=block?'left':center<tr.left+tr.width/2?'left':'right';const band={start:Math.max(0,iy-tr.top-gap),end:Math.min(tr.height,by-tr.top+gap),width:block?tr.width:side==='left'?Math.min(tr.width,rx-tr.left+gap):Math.min(tr.width,tr.right-ix+gap)};(side==='left'?left:right).push(band);}
       for(const [side,bands] of [['left',left],['right',right]]){if(!bands.length)continue;const proxy=document.createElement('span');proxy.className=`canvas-wrap-proxy proxy-${side}`;proxy.contentEditable='false';const width=Math.max(...bands.map(b=>b.width));proxy.style.cssText=`float:${side};width:${Math.max(1,width)}px;height:${Math.max(1,tr.height)}px;shape-outside:${exclusionGradient(bands,tr.height)};shape-image-threshold:.1;pointer-events:none;user-select:none;opacity:0;`;content.prepend(proxy);}
     }
   });
@@ -495,7 +536,7 @@ function attachReadingProgress(text){
     const max=Math.max(1,text.scrollHeight-text.clientHeight);
     const pct=Math.max(0,Math.min(99,Math.round((text.scrollTop/max)*100)));
     const label=document.querySelector('#readerProgressValue'); if(label)label.textContent=`${pct}%`;
-    clearTimeout(timer); timer=setTimeout(()=>{update(s=>{s.readingProgress[workId]=pct;if(!s.library.completed.includes(workId)&&!s.library.reading.includes(workId))s.library.reading.push(workId);});const w=state.works.find(x=>x.id===workId);if(w?.cloud)saveCloudReadingProgress(w,{progress:pct,status:'reading'}).catch(()=>{});},320);
+    clearTimeout(timer); timer=setTimeout(()=>{update(s=>{s.readingProgress[workId]=pct;if(!s.library.completed.includes(workId)&&!s.library.reading.includes(workId))s.library.reading.push(workId);});const w=state.works.find(x=>x.id===workId);if(w?.cloud)saveCloudReadingProgress(w,{progress:pct,status:'reading'}).catch(error=>notify(`Прогресс сохранён на устройстве, но не синхронизирован: ${error.message}`));},320);
   });
 }
 
@@ -520,7 +561,11 @@ function updateEditorWordCount(){
   const text=[...document.querySelectorAll('.rich-editor,.canvas-text-content')].map(x=>x.innerText||'').join(' ').trim();
   const count=text?text.split(/\s+/).filter(Boolean).length:0; label.textContent=`${count} слов`;
 }
+function updateEditorUndoControls(){
+  for(const command of ['undo','redo']){const button=document.querySelector(`.word-tools [data-cmd="${command}"]`);if(button)button.disabled=command==='undo'?!editorRoot.history.canUndo:!editorRoot.history.canRedo;}
+}
 function execEditorCommand(cmd,value=null){
+  if(cmd==='undo'||cmd==='redo'){editorRoot[cmd]();updateEditorUndoControls();return;}
   const ed=restoreEditorSelection(); if(!ed){notify('Сначала поставьте курсор в текст');return;}
   ed.focus();
   try{document.execCommand('styleWithCSS',false,true);document.execCommand(cmd,false,value);}catch{}
@@ -564,36 +609,25 @@ function syncCurrentBookPage(){
   syncCanvasDomToState();
 }
 function syncDocumentPages(){
-  const form=document.querySelector('#workEditor'); if(!form)return;
-  const id=form.dataset.id; const w=state.works.find(x=>x.id===id); if(!w||w.editorMode==='book')return;
-  w.documentPages=[...document.querySelectorAll('.doc-page-editor')].map((el,i)=>({id:w.documentPages?.[i]?.id||`doc-${Date.now()}-${i}`,html:cleanEditorHtml(el)}));
+  const form=document.querySelector('#workEditor');if(!form)return;
+  const w=state.works.find(x=>x.id===form.dataset.id);if(!w||w.editorMode==='book')return;
+  syncCanvasDomToState();
 }
-function syncStudioEditor(){ syncCurrentBookPage(); syncDocumentPages(); }
+function syncEditorMetadata(){
+  const form=document.querySelector('#workEditor');
+  const work=state.works.find(item=>item.id===form?.dataset.id);if(!form||!work)return;
+  const data=new FormData(form);
+  Object.assign(work,{title:String(data.get('title')||'').trim(),kind:data.get('kind')||work.kind,summary:String(data.get('summary')||'').trim(),
+    genres:data.getAll('genres').map(String),formatId:Number(data.get('formatId'))||null,
+    genreIds:data.getAll('genres').map(name=>Number(state.catalogs.genres.find(item=>item.name===name)?.id)).filter(Number.isFinite).slice(0,3),
+    audienceIds:data.getAll('audienceIds').map(Number).filter(Number.isFinite),tagIds:data.getAll('tagIds').map(Number).filter(Number.isFinite).slice(0,30),
+    feedbackWanted:data.getAll('feedback')});
+}
+function syncStudioEditor(){syncCurrentBookPage();syncDocumentPages();syncEditorMetadata();}
 function textFromHtml(html){const d=document.createElement('div');d.innerHTML=html||'';return (d.innerText||'').trim();}
-function insertMedia(src,name){
-  const form=document.querySelector('#workEditor'); if(!form)return;
-  const w=state.works.find(x=>x.id===form.dataset.id); if(!w)return;
-  const pageType=document.querySelector('.book-stage')?.dataset.pageType;
-  if(w.editorMode==='book'&&pageType==='cover'){
-    syncCurrentBookPage(); update(s=>{const p=s.works.find(x=>x.id===w.id)?.bookPages?.[s.ui.bookPageIndex||0];if(p)p.image=src;});render();return;
-  }
-  const ed=restoreEditorSelection(); if(!ed){notify('Поставьте курсор в текст и повторите');return;}
-  const figure=document.createElement('figure');figure.className='embedded-media wrap-block';figure.contentEditable='false';figure.dataset.gap='18';figure.style.cssText='width:55%;max-width:55%;--media-gap:18px';
-  const img=document.createElement('img');img.src=String(src);img.alt=String(name||'Иллюстрация');img.draggable=false;figure.appendChild(img);
-  const cap=document.createElement('figcaption');cap.textContent=String(name||'Иллюстрация');figure.appendChild(cap);
-  const range=savedEditorRange;let block=null;
-  if(range){let node=range.startContainer.nodeType===1?range.startContainer:range.startContainer.parentElement;while(node&&node.parentElement!==ed)node=node.parentElement;if(node&&node.parentElement===ed)block=node;}
-  if(block)block.after(figure);else ed.appendChild(figure);
-  if(!figure.nextSibling){const p=document.createElement('p');p.innerHTML='<br>';ed.appendChild(p);}
-  attachMediaInteractions();selectMediaFigure(figure);updateEditorWordCount();scheduleStudioAutosave();
-}
-function setMediaWrap(wrap){
-  if(!selectedMediaFigure){notify('Сначала нажмите на картинку в тексте');return;}
-  selectedMediaFigure.classList.remove('wrap-left','wrap-right','wrap-wide','wrap-block'); selectedMediaFigure.classList.add(wrap);
-  if(wrap==='wrap-wide'){selectedMediaFigure.style.width='100%';selectedMediaFigure.style.maxWidth='100%';}
-  else if(wrap==='wrap-block' && parseFloat(selectedMediaFigure.style.width||'0')>=95){selectedMediaFigure.style.width='65%';selectedMediaFigure.style.maxWidth='65%';}
-  updateMediaControls();syncStudioEditor();save();
-}
+function insertMedia(src,name){addCanvasImageObject(src,name);}
+function setMediaWrap(wrap){setCanvasObjectProperty('layoutMode','flow');setCanvasObjectProperty('wrapMode',({'wrap-left':'left','wrap-right':'right','wrap-wide':'wide','wrap-block':'center'})[wrap]||'left');}
+
 async function handleMediaUpload(e){
   const file=e.target.files?.[0]; if(!file)return;
   syncStudioEditor();
@@ -602,9 +636,9 @@ async function handleMediaUpload(e){
   try{
     const asset=await uploadStudioAsset(file);
     const src=asset.url;
-    const bookMode=state.works.find(x=>x.id===id)?.editorMode==='book';
+    const activeWork=state.works.find(x=>x.id===id);if(!activeWork)throw new Error('Проект был закрыт во время загрузки');
     update(s=>{const w=s.works.find(x=>x.id===id);if(w)(w.mediaLibrary??=[]).push(asset);},{persist:true});
-    if(bookMode)addCanvasImageObject(src,file.name,220,220,asset);else render();
+    if(document.querySelector('#workEditor')?.dataset.id===id)addCanvasImageObject(src,file.name,220,220,asset);else save();
   }catch(err){alert(`Не удалось обработать изображение: ${err.message}`);}finally{e.target.value='';}
 }
 async function uploadStudioAsset(file){
@@ -617,7 +651,7 @@ function startCreateProject(type,mode){
   const id='w-'+Date.now();
   update(s=>{
     const blank={id,authorId:s.user.id,author:s.user.name,title:'Без названия',kind:type==='fragment'?'Фрагмент':'Роман',genres:[],summary:'',cover:'/assets/home/reading-cover.png',version:'0.1',rating:0,ratingsCount:0,authorActivity:20,createdAt:new Date().toISOString(),minutes:2,publicationStatus:'draft',evaluationStatus:'closed',status:'draft',targetType:'Фрагмент',evaluationTarget:'Фрагмент',evaluationText:'',feedbackWanted:[],content:'',creationType:type,writingStatus:type==='draft'?'draft':'writing',editorMode:mode,documentPages:[{id:'doc-'+Date.now(),html:'<p><br></p>'}],bookPages:[makeCanvasPage('cover','Без названия',s.user.name),makeCanvasPage('title','Без названия',s.user.name),makeCanvasPage('content','Без названия',s.user.name)],mediaLibrary:[]};
-    s.works.unshift(blank);s.ui.selectedStudioWorkId=id;s.ui.createDraftType=null;s.ui.bookPageIndex=0;s.ui.bookViewMode=false;s.ui.bookSpreadIndex=0;s.ui.page='create';
+    s.works.unshift(blank);s.ui.selectedStudioWorkId=id;s.ui.createDraftType=null;s.ui.documentPageIndex=0;s.ui.bookPageIndex=0;s.ui.bookViewMode=false;s.ui.bookSpreadIndex=0;s.ui.page='create';
   }); render();
 }
 function cleanIdentifier(method,value){
@@ -630,8 +664,7 @@ function cloudUserFrom(profile,authUser,fallback={}){
     id:authUser?.id||profile?.id,
     nickname:profile?.nickname||fallback.nickname||profile?.username||'Пользователь',
     name:profile?.nickname||fallback.nickname||profile?.username||'Пользователь',
-    firstName:profile?.first_name||fallback.firstName||'',
-    lastName:profile?.last_name||fallback.lastName||'',
+    ...profileTextState(profile,fallback),
     username:profile?.username||fallback.username||'',
     email:authUser?.email||fallback.email||'',
     phone:authUser?.phone||fallback.phone||'',
@@ -641,8 +674,8 @@ function cloudUserFrom(profile,authUser,fallback={}){
     isAdmin:!!profile?.is_admin,
     xp:profile?.xp||0,
     reputation:profile?.reviewer_reputation||0,
-    bio:profile?.bio||fallback.bio||'',currentStatus:profile?.current_status||fallback.currentStatus||'',interests:profile?.interests||fallback.interests||[],favoriteTopics:profile?.favorite_topics||fallback.favoriteTopics||[],
-    avatarPath:profile?.avatar_path||fallback.avatarPath||'',avatarUrl:profile?.avatar_path?publicObjectUrl('lit-avatars',profile.avatar_path):(fallback.avatarUrl||''),bannerPath:profile?.banner_path||fallback.bannerPath||'',bannerUrl:profile?.banner_path?publicObjectUrl('lit-profile-banners',profile.banner_path):(fallback.bannerUrl||''),
+    interests:profile?.interests||fallback.interests||[],favoriteTopics:profile?.favorite_topics||fallback.favoriteTopics||[],
+    ...profileMediaState(profile,fallback,publicObjectUrl),
     preferences:profile?.wanted_genres||fallback.preferences||[],
     avoid:profile?.unwanted_genres||fallback.avoid||[],
     cloud:true,
@@ -728,13 +761,13 @@ async function handleOtpVerify(e){
     const user=cloudUserFrom(profile,auth.user,fallback);
     await refreshIdentityData(user);
     update(s=>{s.user=user;s.ui.page='home';s.cloud={...(s.cloud||{}),connected:true,serverOnline:true,lastSync:new Date().toISOString(),error:null};});
-    signupRole=null;loginMode=false;otpPending=null;forceAuthScreen=false;await refreshCloudLiterature();await refreshCloudFeed();await refreshCloudChats(false);await refreshNotifications(false);if(user.isAdmin)await refreshAdminData(false);startCloudPolling();render();
+    signupRole=null;loginMode=false;otpPending=null;forceAuthScreen=false;if(currentRoute.page==='post')update(s=>s.ui.page='post',{persist:false});await refreshCloudLiterature();await refreshCloudFeed();await refreshCloudChats(false);await refreshNotifications(false);if(user.isAdmin)await refreshAdminData(false);startCloudPolling();render();
   }catch(err){alert(`Код не подтверждён: ${err.message}`);}
 }
 
 async function refreshCloudFeed(){
   if(!isCloudAuthenticated())return;
-  try{const cloud=await fetchPublicFeed();update(s=>{s.posts=cloud;s.cloud={...(s.cloud||{}),connected:true,serverOnline:true,lastSync:new Date().toISOString(),error:null};},{persist:false});cloudFeedLoaded=true;}catch(err){update(s=>{s.cloud={...(s.cloud||{}),connected:isCloudAuthenticated(),lastSync:null,error:err.message};},{persist:false});}
+  try{const cloud=await fetchPublicFeed();update(s=>{s.posts=permalinkPost&&!cloud.some(post=>post.id===permalinkPost.id)?[permalinkPost,...cloud]:cloud;s.cloud={...(s.cloud||{}),connected:true,serverOnline:true,lastSync:new Date().toISOString(),error:null};},{persist:false});cloudFeedLoaded=true;}catch(err){update(s=>{s.cloud={...(s.cloud||{}),connected:isCloudAuthenticated(),lastSync:null,error:err.message};},{persist:false});}
 }
 async function refreshIdentityData(user){
   const [catalogs,details]=await Promise.all([fetchDiscoveryCatalogs(),fetchMyProfileDetails()]);mergeProfileDetails(user,details,catalogs);update(s=>{s.catalogs=catalogs;s.user=user;},{persist:true});
@@ -793,21 +826,45 @@ function previewCurrentWork(){
   openModal(`<div class="publish-preview"><span class="eyebrow">Предпросмотр карточки</span><div class="preview-work-card"><img src="${esc(w.cover||'/assets/home/reading-cover.png')}" alt=""><div><h2>${esc(x.title||'Без названия')}</h2><p class="muted">${esc(state.user.name)} · ${esc(x.kind)}</p><div>${x.genres.map(g=>`<span class="pill">${esc(g)}</span>`).join('')}</div><p>${esc(x.summary||'Описание ещё не добавлено.')}</p><small>${x.content.trim()?x.content.trim().split(/\s+/).length:0} слов · ~${Math.max(1,Math.ceil(x.content.length/900))} мин</small></div></div><div class="modal-actions"><button data-action="close-modal">Закрыть</button></div></div>`,'wide');
 }
 let lastChatSignature='';
+let chatRefreshGeneration=0;
+let lastAppliedChatRefresh=0;
+let chatSelectionIntent=0;
+function hasChatDraft(){
+  return !!document.activeElement?.matches?.('input,textarea,select,[contenteditable="true"]')||!!document.activeElement?.closest?.('.thread-message-form')||!!document.querySelector('form[aria-busy="true"],button[aria-busy="true"]')||[...document.querySelectorAll('.thread-message-form input[name="message"]')].some(input=>input.value.trim());
+}
+function updateChatMessageStreams(){
+  for(const form of document.querySelectorAll('.thread-message-form')){
+    const thread=state.chatThreads.find(item=>item.id===form.dataset.thread);
+    const stream=form.parentElement?.querySelector('.drawer-messages,.message-stream');
+    if(!thread||!stream)continue;
+    const nearBottom=stream.scrollHeight-stream.scrollTop-stream.clientHeight<32;
+    stream.innerHTML=pages.threadMessages(thread);
+    if(nearBottom)stream.scrollTop=stream.scrollHeight;
+  }
+}
 async function refreshCloudChats(renderIfChanged=true){
   if(!isCloudAuthenticated())return;
+  const generation=++chatRefreshGeneration;
+  const requestedSelection=state.ui.selectedChatId;
+  const requestedUser=state.user?.id;
+  const requestedIntent=chatSelectionIntent;
+  const stale=()=>generation<lastAppliedChatRefresh||requestedSelection!==state.ui.selectedChatId||requestedIntent!==chatSelectionIntent||requestedUser!==state.user?.id||!isCloudAuthenticated();
   try{
     const data=await fetchMyConversations();
-    let selectedId=state.ui.selectedChatId;
+    if(stale())return;
+    let selectedId=requestedSelection;
     if(!data.threads.some(t=>t.id===selectedId))selectedId=data.threads[0]?.id||null;
     if(selectedId){
       const selected=data.threads.find(t=>t.id===selectedId);
       if(selected)selected.messages=await fetchConversationMessages(selectedId);
     }
+    if(stale())return;
+    lastAppliedChatRefresh=generation;
     const sig=JSON.stringify(data.threads.map(t=>[t.id,t.title,(t.messages||[]).map(m=>m.id)]));
     const changed=sig!==lastChatSignature;
     update(s=>{s.chatThreads=data.threads;s.peopleDirectory=data.people;s.friends=data.threads.filter(t=>t.type==='dm').flatMap(t=>t.memberIds).filter((x,i,a)=>a.indexOf(x)===i);s.ui.selectedChatId=selectedId;},{persist:false});
-    const typing=document.activeElement?.closest?.('.thread-message-form');
-    if(changed&&renderIfChanged&&!typing){lastChatSignature=sig;render();}
+    if(changed&&renderIfChanged&&!hasChatDraft()){lastChatSignature=sig;render();}
+    else if(changed&&renderIfChanged)updateChatMessageStreams();
     else if(!changed||!renderIfChanged)lastChatSignature=sig;
   }catch(err){console.warn('chat sync',err);}
 }
@@ -820,9 +877,11 @@ function startCloudPolling(){
 function stopCloudPolling(){clearInterval(chatsPollTimer);clearInterval(incomingCallTimer);clearInterval(notificationsTimer);chatsPollTimer=null;incomingCallTimer=null;notificationsTimer=null;}
 
 async function pollIncomingCalls(){
-  if(!isCloudAuthenticated()||activeRtc)return;
+  if(!isCloudAuthenticated()||activeRtc||callSetupPending)return;
   try{
     const calls=await fetchIncomingCalls();
+    const incomingId=document.querySelector('.incoming-call [data-action="accept-cloud-call"]')?.dataset.id;
+    if(incomingId&&!calls.some(call=>call.id===incomingId&&Date.now()-new Date(call.created_at).getTime()<60000)){closeModal();return;}
     const fresh=calls.find(c=>Date.now()-new Date(c.created_at).getTime()<60000&&!seenIncomingCalls.has(c.id));
     if(!fresh)return;
     seenIncomingCalls.add(fresh.id);
@@ -832,73 +891,123 @@ async function pollIncomingCalls(){
 }
 
 function removeCallOverlay(){document.querySelector('#realCallOverlay')?.remove();}
-function showCallOverlay({title,mode,status='Соединение…'}){
+function showCallOverlay({title,mode,status='Соединение',callState='connecting'}){
   removeCallOverlay();
-  const box=document.createElement('section');box.id='realCallOverlay';box.className=`real-call-overlay ${mode==='video'?'video':'audio'}`;
-  box.innerHTML=`<div class="real-call-head"><div><span class="eyebrow">${mode==='video'?'Видеозвонок':'Аудиозвонок'}</span><h3>${esc(title)}</h3><small id="realCallStatus">${esc(status)}</small></div><button class="danger" id="realCallHangup">Завершить</button></div>${mode==='video'?`<div class="call-videos"><video id="remoteCallVideo" autoplay playsinline></video><video id="localCallVideo" autoplay playsinline muted></video></div>`:`<div class="audio-call-orb">☎</div><audio id="remoteCallAudio" autoplay></audio>`}`;
-  document.body.appendChild(box);box.querySelector('#realCallHangup')?.addEventListener('click',()=>endCall(true));
+  const box=document.createElement('section');box.id='realCallOverlay';box.className=`real-call-overlay ${mode==='video'?'video':'audio'}`;box.dataset.callState=callState;
+  box.innerHTML=`<div class="real-call-head"><div><span class="eyebrow">${mode==='video'?'Видеозвонок':'Аудиозвонок'}</span><h3>${esc(title)}</h3><small id="realCallStatus" role="status" aria-live="polite">${esc(status)}</small></div><button class="danger" id="realCallHangup">Завершить</button></div>${mode==='video'?`<div class="call-videos"><video id="remoteCallVideo" autoplay playsinline></video><video id="localCallVideo" autoplay playsinline muted></video></div>`:`<div class="audio-call-orb">☎</div><audio id="remoteCallAudio" autoplay></audio>`}<div class="call-controls"><button id="realCallMute" disabled aria-pressed="false">Выключить микрофон</button>${mode==='video'?'<button id="realCallCamera" disabled aria-pressed="false">Выключить камеру</button><button id="realCallSwitch" disabled>Сменить камеру</button>':''}<button id="realCallResumeMedia" hidden>Включить звук</button></div><p id="realCallMediaError" class="call-media-error" role="status" hidden></p>`;
+  document.body.appendChild(box);
+  box.querySelector('#realCallHangup').addEventListener('click',()=>endCall(true));
+  box.querySelector('#realCallMute').addEventListener('click',event=>toggleCallTrack('audio',event.currentTarget));
+  box.querySelector('#realCallCamera')?.addEventListener('click',event=>toggleCallTrack('video',event.currentTarget));
+  box.querySelector('#realCallSwitch')?.addEventListener('click',async event=>{
+    const button=event.currentTarget;button.disabled=true;
+    try{await activeRtc?.session.switchCamera();setCallMediaError('');}catch(error){setCallMediaError(error.message);}finally{if(button.isConnected)button.disabled=false;}
+  });
+  box.querySelector('#realCallResumeMedia').addEventListener('click',async event=>{
+    try{await document.querySelector('#remoteCallVideo,#remoteCallAudio')?.play();event.currentTarget.hidden=true;setCallMediaError('');}catch{setCallMediaError('Не удалось включить звук. Проверьте разрешения браузера.');}
+  });
 }
-function setCallStatusText(text){const el=document.querySelector('#realCallStatus');if(el)el.textContent=text;}
+function setCallMediaError(text){const element=document.querySelector('#realCallMediaError');if(element){element.textContent=text;element.hidden=!text;}}
+function setCallStatusText(text,callState='connecting',detail=''){
+  const el=document.querySelector('#realCallStatus');if(el)el.textContent=detail?`${text}: ${detail}`:text;
+  const overlay=document.querySelector('#realCallOverlay');if(overlay)overlay.dataset.callState=callState;
+}
+function toggleCallTrack(kind,button){
+  try{
+    if(!activeRtc?.session)throw new Error('Звонок ещё не подключён');
+    const enabled=activeRtc.session.toggleTrack(kind);button.setAttribute('aria-pressed',String(!enabled));button.textContent=kind==='audio'?(enabled?'Выключить микрофон':'Включить микрофон'):(enabled?'Выключить камеру':'Включить камеру');
+  }catch(error){setCallMediaError(error.message);}
+}
 async function setupRtc({callId,conversationId,peerId,title,mode,initiator}){
-  if(!navigator.mediaDevices?.getUserMedia)throw new Error('Браузер не поддерживает доступ к микрофону/камере');
-  const stream=await navigator.mediaDevices.getUserMedia({audio:true,video:mode==='video'});
-  const pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'}]});
-  const remoteStream=new MediaStream();
-  stream.getTracks().forEach(track=>pc.addTrack(track,stream));
-  pc.ontrack=e=>{e.streams[0]?.getTracks().forEach(track=>{if(!remoteStream.getTracks().some(t=>t.id===track.id))remoteStream.addTrack(track);});const v=document.querySelector(mode==='video'?'#remoteCallVideo':'#remoteCallAudio');if(v)v.srcObject=remoteStream;};
-  pc.onicecandidate=e=>{if(e.candidate)sendCloudCallSignal(callId,peerId,'ice',e.candidate.toJSON()).catch(console.warn);};
-  pc.onconnectionstatechange=()=>{const st=pc.connectionState;if(st==='connected')setCallStatusText('Соединено');else if(st==='connecting')setCallStatusText('Соединение…');else if(['failed','disconnected'].includes(st))setCallStatusText('Связь прервана');};
-  activeRtc={callId,conversationId,peerId,title,mode,initiator,pc,localStream:stream,remoteStream,lastSignalId:0,pendingIce:[],statusPollCounter:0};
-  update(s=>{s.activeCall={threadId:conversationId,callId,title,mode,startedAt:new Date().toISOString(),real:true};s.ui.chatTab='calls';s.ui.chatPanelOpen=true;},{persist:false});
-  showCallOverlay({title,mode});
-  const local=document.querySelector('#localCallVideo');if(local)local.srcObject=stream;
-  callSignalTimer=setInterval(pollCallSignals,450);
-  if(initiator){
-    const offer=await pc.createOffer();await pc.setLocalDescription(offer);await sendCloudCallSignal(callId,peerId,'offer',{type:offer.type,sdp:offer.sdp});
+  if(activeRtc)throw new Error('Сначала завершите текущий звонок');
+  const iceServers=buildIceServers();
+  const c={callId,conversationId,peerId,title,mode,initiator,lastSignalId:0,statusPollCounter:0,pollFailures:0,polling:false,ready:false};
+  activeRtc=c;
+  showCallOverlay({title,mode,status:initiator?'Звоним':'Соединение',callState:initiator?'calling':'connecting'});
+  c.session=new CallSession({mode,initiator,iceServers,debug:globalThis.__FRAKTUM_CONFIG__?.VITE_CALL_DEBUG==='true',
+    sendSignal:(type,payload)=>sendCloudCallSignal(callId,peerId,type,payload),
+    onStatus:(status,label,detail)=>{if(activeRtc===c)setCallStatusText(label,status,detail);},
+    onLocal:stream=>{const video=document.querySelector('#localCallVideo');if(activeRtc===c&&video)video.srcObject=stream;},
+    onRemote:stream=>{
+      if(activeRtc!==c)return;const media=document.querySelector(mode==='video'?'#remoteCallVideo':'#remoteCallAudio');if(!media)return;
+      media.srcObject=stream;media.play().catch(()=>{if(activeRtc!==c)return;setCallMediaError('Браузер заблокировал звук. Нажмите «Включить звук».');const button=document.querySelector('#realCallResumeMedia');if(button)button.hidden=false;});
+    },
+    onFailure:message=>{if(activeRtc===c)finishLocalCall(true,{message,status:'failed',keepOverlay:true});}
+  });
+  try{
+    await c.session.open();
+    if(activeRtc!==c||c.session.closed)throw new Error('Звонок уже завершён');
+    c.ready=true;
+    document.querySelectorAll('#realCallMute,#realCallCamera').forEach(button=>button.disabled=false);
+    c.session.canSwitchCamera().then(supported=>{const button=document.querySelector('#realCallSwitch');if(activeRtc===c&&button)button.disabled=!supported;}).catch(error=>setCallMediaError(`Не удалось проверить камеры: ${error.message}`));
+    update(s=>{s.activeCall={threadId:conversationId,callId,title,mode,startedAt:new Date().toISOString(),real:true};s.ui.chatTab='calls';s.ui.chatPanelOpen=true;},{persist:false});
+    pollCallSignals();
+    return c;
+  }catch(error){
+    if(activeRtc===c){c.session.close();activeRtc=null;removeCallOverlay();}
+    throw error;
   }
 }
-async function flushPendingIce(){
-  if(!activeRtc?.pc.remoteDescription)return;
-  for(const c of activeRtc.pendingIce.splice(0)){try{await activeRtc.pc.addIceCandidate(c);}catch(err){console.warn(err);}}
-}
 async function pollCallSignals(){
-  if(!activeRtc)return;
+  const c=activeRtc;if(!c?.ready||c.polling)return;c.polling=true;
   try{
-    activeRtc.statusPollCounter=(activeRtc.statusPollCounter||0)+1;
-    if(activeRtc.statusPollCounter%5===0){
-      const status=await getCloudCall(activeRtc.callId);
-      if(status&&['declined','ended','missed'].includes(status.status)){setCallStatusText(status.status==='declined'?'Звонок отклонён':'Звонок завершён');await finishLocalCall(false);return;}
-    }
-    const signals=await fetchCloudCallSignals(activeRtc.callId,activeRtc.lastSignalId);
-    for(const sig of signals){
-      activeRtc.lastSignalId=Math.max(activeRtc.lastSignalId,Number(sig.id)||0);
-      if(sig.signal_type==='hangup'){await finishLocalCall(false);return;}
-      if(sig.signal_type==='offer'&&!activeRtc.initiator){
-        await activeRtc.pc.setRemoteDescription(new RTCSessionDescription(sig.payload));await flushPendingIce();
-        const answer=await activeRtc.pc.createAnswer();await activeRtc.pc.setLocalDescription(answer);await sendCloudCallSignal(activeRtc.callId,activeRtc.peerId,'answer',{type:answer.type,sdp:answer.sdp});
-      }else if(sig.signal_type==='answer'&&activeRtc.initiator){
-        await activeRtc.pc.setRemoteDescription(new RTCSessionDescription(sig.payload));await flushPendingIce();
-      }else if(sig.signal_type==='ice'){
-        const candidate=new RTCIceCandidate(sig.payload);if(activeRtc.pc.remoteDescription)await activeRtc.pc.addIceCandidate(candidate);else activeRtc.pendingIce.push(candidate);
+    c.statusPollCounter++;
+    if(c.statusPollCounter===1||c.statusPollCounter%5===0){
+      const record=await getCloudCall(c.callId);if(activeRtc!==c)return;
+      if(record&&['declined','ended','missed'].includes(record.status)){
+        await finishLocalCall(false,{message:record.status==='declined'?'Собеседник отклонил звонок':'',status:'ended',keepOverlay:true});return;
       }
     }
-  }catch(err){console.warn('call signaling',err);}
+    const signals=await fetchCloudCallSignals(c.callId,c.lastSignalId);if(activeRtc!==c)return;
+    c.pollFailures=0;
+    for(const signal of signals){
+      if(activeRtc!==c)return;
+      if(signal.sender_id!==c.peerId)throw new Error('Получены параметры звонка от неизвестного участника');
+      if(signal.signal_type==='hangup'){await finishLocalCall(false,{status:'ended',keepOverlay:true});return;}
+      try{await c.session.receive(signal.signal_type,signal.payload);}catch(error){c.session.fail(error,'Не удалось согласовать media connection. Попробуйте позвонить ещё раз.');return;}
+      if(activeRtc!==c)return;c.lastSignalId=Math.max(c.lastSignalId,Number(signal.id)||0);
+    }
+  }catch(error){
+    if(activeRtc!==c)return;
+    c.session.diagnostic('signaling-error',{name:error?.name||'Error'});
+    c.pollFailures++;
+    if(c.pollFailures>=3)c.session.fail(error,'Сервер сигнализации недоступен. Проверьте сеть и повторите звонок.');
+    else setCallMediaError('Не удалось обновить параметры звонка. Повторяем соединение с сервером.');
+  }finally{
+    c.polling=false;
+    if(activeRtc===c)callSignalTimer=setTimeout(pollCallSignals,450);
+  }
 }
 async function acceptCloudCall(callId){
+  if(callSetupPending||activeRtc){notify('Сначала завершите текущий звонок');return;}
+  callSetupPending=true;let claimed=false;
   try{
     const call=await getCloudCall(callId);if(!call||call.status!=='ringing')throw new Error('Звонок уже завершён');
-    const peer=await getConversationPeer(call.conversation_id);await setCloudCallStatus(callId,'active');closeModal();
+    const peer=await getConversationPeer(call.conversation_id);
+    await setCloudCallStatus(callId,'active',{expectedStatus:'ringing'});claimed=true;closeModal();
     await setupRtc({callId,conversationId:call.conversation_id,peerId:peer.id,title:peer.nickname||peer.username||'Пользователь',mode:call.mode,initiator:false});
-  }catch(err){alert(`Не удалось принять звонок: ${err.message}`);}
+  }catch(error){
+    if(claimed&&activeRtc?.callId===callId)await finishLocalCall(true);
+    else if(claimed){const result=await Promise.allSettled([setCloudCallStatus(callId,'ended')]);if(result[0].status==='rejected')notify('Не удалось подтвердить завершение звонка на сервере');}
+    else closeModal();
+    notify(`Не удалось принять звонок: ${error.message}`);
+  }finally{callSetupPending=false;}
 }
-async function declineCloudCall(callId){try{await setCloudCallStatus(callId,'declined');closeModal();}catch(err){alert(err.message);}}
-async function finishLocalCall(updateServer=true){
-  if(!activeRtc){removeCallOverlay();return;}
-  const c=activeRtc;activeRtc=null;clearInterval(callSignalTimer);callSignalTimer=null;
-  try{c.localStream?.getTracks().forEach(t=>t.stop());c.pc?.close();}catch{}
-  removeCallOverlay();
-  update(s=>{s.callHistory.push({id:c.callId,title:c.title,mode:c.mode==='video'?'Видео':'Аудио',endedAt:new Date().toLocaleString('ru-RU',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'2-digit'})});s.activeCall=null;s.ui.chatTab='calls';},{persist:false});
-  if(updateServer){await sendCloudCallSignal(c.callId,c.peerId,'hangup',{}).catch(()=>{});await setCloudCallStatus(c.callId,'ended').catch(()=>{});}render();
+async function declineCloudCall(callId){try{await setCloudCallStatus(callId,'declined',{expectedStatus:'ringing'});closeModal();}catch(error){notify(`Не удалось отклонить звонок: ${error.message}`);}}
+async function finishLocalCall(updateServer=true,{message='',status='ended',keepOverlay=false}={}){
+  const c=activeRtc;
+  if(!c){if(!keepOverlay)removeCallOverlay();return;}
+  activeRtc=null;clearTimeout(callSignalTimer);callSignalTimer=null;c.session.close();
+  if(keepOverlay){
+    setCallStatusText(status==='failed'?'Нет соединения':'Завершён',status,message);
+    document.querySelector('.call-controls')?.setAttribute('hidden','');const button=document.querySelector('#realCallHangup');if(button)button.textContent='Закрыть';
+  }else removeCallOverlay();
+  update(s=>{s.callHistory.push({id:c.callId,title:c.title,mode:c.mode==='video'?'Видео':'Аудио',endedAt:new Date().toLocaleString('ru-RU',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'2-digit'}),outcome:status});s.activeCall=null;s.ui.chatTab='calls';},{persist:false});
+  if(updateServer){
+    const results=await Promise.allSettled([sendCloudCallSignal(c.callId,c.peerId,'hangup',{}),setCloudCallStatus(c.callId,'ended')]);
+    if(results.some(result=>result.status==='rejected'))notify('Локальный звонок завершён, но сервер не подтвердил завершение. Проверьте подключение.');
+  }
+  render();
 }
 
 function animateBookTurn({reader=false,direction=1}){
@@ -909,7 +1018,7 @@ function animateBookTurn({reader=false,direction=1}){
   let next;if(singlePage)next=current+(direction>0?1:-1);else if(direction>0)next=current===0?1:current+2;else next=current<=1?0:current-2;next=Math.max(0,Math.min(pages.length-1,next));if(next===current)return;
   const spread=document.querySelector(reader?'.reader-book-spread':'[data-book-spread]');if(!spread){update(s=>s.ui[field]=next,{persist:false});render();return;}
   bookFlipLocked=true;spread.classList.add(direction>0?'turn-next':'turn-prev');
-  if(reader){const pct=Math.min(99,Math.round(((next+1)/Math.max(1,pages.length))*100));update(s=>{s.readingProgress[w.id]=pct;if(!s.library.reading.includes(w.id))s.library.reading.push(w.id);},{persist:true});if(w.cloud)saveCloudReadingProgress(w,{progress:pct,status:'reading'}).catch(()=>{});}
+  if(reader){const pct=Math.min(99,Math.round(((next+1)/Math.max(1,pages.length))*100));update(s=>{s.readingProgress[w.id]=pct;if(!s.library.reading.includes(w.id))s.library.reading.push(w.id);},{persist:true});if(w.cloud)saveCloudReadingProgress(w,{progress:pct,status:'reading'}).catch(error=>notify(`Прогресс сохранён на устройстве, но не синхронизирован: ${error.message}`));}
   setTimeout(()=>{update(s=>s.ui[field]=next,{persist:false});bookFlipLocked=false;render();},360);
 }
 
@@ -926,26 +1035,30 @@ function searchGlobal(q){
   notify('Ничего не найдено');
 }
 
-app.addEventListener('click',async e=>{
-  const figure=e.target.closest('.rich-editor .embedded-media');
-  if(figure && !e.target.closest('.media-drag-handle')) selectMediaFigure(figure);
-  else if(!figure && selectedMediaFigure && !e.target.closest('.studio-media')) selectMediaFigure(null);
+app.addEventListener('click',e=>{
+  const control=e.target.closest('[data-action]');
+  if(control?.disabled||control?.getAttribute('aria-disabled')==='true')return;
+  void withBusy(control,()=>dispatchClick(e)).catch(error=>notify(`Действие не выполнено: ${error.message}`));
+});
+async function dispatchClick(e){
   const el=e.target.closest('[data-action]'); if(!el)return;
   // A modal backdrop closes only when the backdrop itself is clicked.
   // Clicks on inputs, chips and controls inside the modal must stay inside the modal.
   if(el.classList.contains('modal-backdrop') && e.target.closest('[data-stop]')) return;
   const action=el.dataset.action;
   if(action==='choose-role'){signupRole=el.dataset.role;loginMode=false;otpPending=null;render();return;}
-  if(action==='show-login'){loginMode=true;signupRole=null;otpPending=null;render();return;}
+  if(action==='show-login'){forceAuthScreen=true;loginMode=true;signupRole=null;otpPending=null;render();return;}
   if(action==='show-signup'){loginMode=false;signupRole=null;otpPending=null;render();return;}
   if(action==='auth-method'){authMethod=el.dataset.method==='phone'?'phone':'email';otpPending=null;render();return;}
   if(action==='cancel-otp'){otpPending=null;render();return;}
   if(action==='resend-otp'){return resendOtp();}
   if(action==='cloud-login'){forceAuthScreen=true;loginMode=true;signupRole=null;otpPending=null;render();return;}
   if(action==='launch-game'){try{await openFraktumGame();notify('FRAKTUM TCG открыт с вашим единым аккаунтом');}catch(error){notify(error instanceof Error?error.message:String(error));}return;}
-  if(action==='cloud-logout'){stopCloudPolling();if(activeRtc)await finishLocalCall(false);await signOut();update(s=>{s.user=null;s.posts=[];s.chatThreads=[];s.peopleDirectory=[];s.friends=[];s.cloud={...(s.cloud||{}),connected:false};},{persist:false});loginMode=true;forceAuthScreen=false;render();return;}
+  if(action==='cloud-logout'){stopCloudPolling();try{if(activeRtc)await finishLocalCall(false);await signOut();}finally{update(s=>{s.user=null;s.posts=[];s.chatThreads=[];s.peopleDirectory=[];s.friends=[];s.cloud={...(s.cloud||{}),connected:false};},{persist:false});loginMode=true;forceAuthScreen=false;render();}return;}
   if(action==='back-onboarding'){signupRole=null;otpPending=null;render();return;}
   if(action==='navigate'){if(el.dataset.page==='admin')await refreshAdminData(false);if(el.dataset.page==='feedback')await refreshAuthorFeedback();go(el.dataset.page);return;}
+  if(action==='share-post'){try{await shareFeedPost(el.dataset.id);}catch(error){notify(`Не удалось поделиться: ${error.message}`);}return;}
+  if(action==='retry-post'){if(currentRoute.postId)await loadPermalink(currentRoute.postId);return;}
   if(action==='toggle-sidebar'){update(s=>s.ui.sidebarOpen=!s.ui.sidebarOpen,{persist:false});render();return;}
   if(action==='start-evaluation') return startEvaluation();
   if(action==='evaluation-session-dialog') return evaluationSessionDialog();
@@ -974,8 +1087,8 @@ app.addEventListener('click',async e=>{
   if(action==='profile-tab'){update(s=>s.ui.profileTab=el.dataset.tab,{persist:false});render();return;}
   if(action==='open-post') return postDialog();
   if(action==='open-notifications'){await refreshNotifications(false);notificationCenter();return;}
-  if(action==='notifications-read-all'){await markAllNotificationsRead().catch(()=>{});await refreshNotifications(false);notificationCenter();return;}
-  if(action==='notification-open'){await markNotificationRead(el.dataset.id).catch(()=>{});await refreshNotifications(false);closeModal();if(el.dataset.kind==='conversation'&&el.dataset.entity){update(s=>{s.ui.selectedChatId=el.dataset.entity;s.ui.page='messages';},{persist:false});await refreshCloudChats(false);}render();return;}
+  if(action==='notifications-read-all'){await markAllNotificationsRead();await refreshNotifications(false);notificationCenter();return;}
+  if(action==='notification-open'){await markNotificationRead(el.dataset.id);await refreshNotifications(false);closeModal();if(el.dataset.kind==='conversation'&&el.dataset.entity){update(s=>{s.ui.selectedChatId=el.dataset.entity;s.ui.page='messages';},{persist:false});await refreshCloudChats(false);}render();return;}
   if(action==='report-content') return reportDialog(el.dataset.targetType||'content',el.dataset.targetId||'');
   if(action==='refresh-admin'){await refreshAdminData(true);return;}
   if(action==='moderation-status'){await setModerationReportStatus(el.dataset.id,el.dataset.status);await refreshAdminData(true);return;}
@@ -1005,18 +1118,20 @@ app.addEventListener('click',async e=>{
   if(action==='canvas-duplicate'){duplicateSelectedCanvasObject();return;}
   if(action==='canvas-lock'){toggleCanvasLock();return;}
   if(action==='canvas-delete'){deleteSelectedCanvasObject();return;}
+  if(action==='retry-media-image'){const object=el.closest('.structured-media'),image=object?.querySelector('img');if(image){const source=object.dataset.mediaUrl||image.getAttribute('src');const retry=new URL(source,location.origin);retry.searchParams.set('fraktum_retry',String(Date.now()));image.src=retry.href;}return;}
   if(action==='media-wrap'){setMediaWrap(el.dataset.wrap);return;}
   if(action==='media-size'){setMediaSize(el.dataset.size);return;}
   if(action==='media-caption-toggle'){toggleMediaCaption();return;}
   if(action==='media-reset'){resetMediaPosition();return;}
-  if(action==='delete-media'){if(selectedMediaFigure){selectedMediaFigure.remove();selectedMediaFigure=null;syncStudioEditor();save();updateEditorWordCount();}else notify('Сначала нажмите на картинку в тексте');return;}
-  if(action==='book-page-select'){syncCurrentBookPage();const idx=Number(el.dataset.index)||0;update(s=>{s.ui.bookPageIndex=idx;s.ui.canvasSelectedObjectId=null;if(s.ui.bookViewMode)s.ui.bookSpreadIndex=idx===0?0:(idx%2===1?idx:idx-1);},{persist:false});render();return;}
-  if(action==='book-page-prev'){syncCurrentBookPage();update(s=>{s.ui.bookPageIndex=Math.max(0,(s.ui.bookPageIndex||0)-1);s.ui.canvasSelectedObjectId=null;},{persist:false});render();return;}
-  if(action==='book-page-next'){syncCurrentBookPage();const w=state.works.find(x=>x.id===document.querySelector('#workEditor')?.dataset.id);update(s=>{s.ui.bookPageIndex=Math.min(Math.max(0,(w?.bookPages?.length||1)-1),(s.ui.bookPageIndex||0)+1);s.ui.canvasSelectedObjectId=null;},{persist:false});render();return;}
-  if(action==='add-book-page'){syncCurrentBookPage();const id=document.querySelector('#workEditor')?.dataset.id;update(s=>{const w=s.works.find(x=>x.id===id);if(w){const page=makeCanvasPage('content',w.title,w.author||s.user?.name||'');page.label=`Страница ${Math.max(1,w.bookPages.length-1)}`;w.bookPages.push(page);s.ui.bookPageIndex=w.bookPages.length-1;s.ui.bookViewMode=false;s.ui.canvasSelectedObjectId=null;}});render();return;}
-  if(action==='delete-book-page'){syncCurrentBookPage();const id=document.querySelector('#workEditor')?.dataset.id;const idx=Number(el.dataset.index);update(s=>{const w=s.works.find(x=>x.id===id);if(!w||!w.bookPages?.[idx]||w.bookPages[idx].type!=='content')return;w.bookPages.splice(idx,1);s.ui.bookPageIndex=Math.max(0,Math.min(idx-1,w.bookPages.length-1));s.ui.bookSpreadIndex=Math.max(0,Math.min(s.ui.bookSpreadIndex||0,w.bookPages.length-1));});render();return;}
-  if(action==='add-document-page'){syncDocumentPages();const id=document.querySelector('#workEditor')?.dataset.id;update(s=>{const w=s.works.find(x=>x.id===id);if(w)w.documentPages.push({id:'doc-'+Date.now(),html:'<p><br></p>'});});render();return;}
-  if(action==='studio-select'){syncStudioEditor();update(s=>{s.ui.selectedStudioWorkId=el.dataset.id;s.ui.page='create';s.ui.bookPageIndex=0;s.ui.bookViewMode=false;s.ui.bookSpreadIndex=0;s.ui.canvasSelectedObjectId=null;},{persist:false});render();return;}
+  if(action==='delete-media'){deleteSelectedCanvasObject();return;}
+  if(action==='book-page-select'){syncCurrentBookPage();editorRoot.history.clear();const idx=Number(el.dataset.index)||0;update(s=>{s.ui.bookPageIndex=idx;s.ui.canvasSelectedObjectId=null;if(s.ui.bookViewMode)s.ui.bookSpreadIndex=idx===0?0:(idx%2===1?idx:idx-1);},{persist:false});render();return;}
+  if(action==='book-page-prev'){syncCurrentBookPage();editorRoot.history.clear();update(s=>{s.ui.bookPageIndex=Math.max(0,(s.ui.bookPageIndex||0)-1);s.ui.canvasSelectedObjectId=null;},{persist:false});render();return;}
+  if(action==='book-page-next'){syncCurrentBookPage();editorRoot.history.clear();const w=state.works.find(x=>x.id===document.querySelector('#workEditor')?.dataset.id);update(s=>{s.ui.bookPageIndex=Math.min(Math.max(0,(w?.bookPages?.length||1)-1),(s.ui.bookPageIndex||0)+1);s.ui.canvasSelectedObjectId=null;},{persist:false});render();return;}
+  if(action==='add-book-page'){syncCurrentBookPage();editorRoot.history.clear();const id=document.querySelector('#workEditor')?.dataset.id;update(s=>{const w=s.works.find(x=>x.id===id);if(w){const page=makeCanvasPage('content',w.title,w.author||s.user?.name||'');page.label=`Страница ${Math.max(1,w.bookPages.length-1)}`;w.bookPages.push(page);s.ui.bookPageIndex=w.bookPages.length-1;s.ui.bookViewMode=false;s.ui.canvasSelectedObjectId=null;}});render();return;}
+  if(action==='delete-book-page'){syncCurrentBookPage();editorRoot.history.clear();const id=document.querySelector('#workEditor')?.dataset.id;const idx=Number(el.dataset.index);update(s=>{const w=s.works.find(x=>x.id===id);if(!w||!w.bookPages?.[idx]||w.bookPages[idx].type!=='content')return;w.bookPages.splice(idx,1);s.ui.bookPageIndex=Math.max(0,Math.min(idx-1,w.bookPages.length-1));s.ui.bookSpreadIndex=Math.max(0,Math.min(s.ui.bookSpreadIndex||0,w.bookPages.length-1));});render();return;}
+  if(action==='document-page-select'){syncStudioEditor();editorRoot.history.clear();update(s=>{s.ui.documentPageIndex=Number(el.dataset.index)||0;s.ui.canvasSelectedObjectId=null;},{persist:false});render();return;}
+  if(action==='add-document-page'){syncStudioEditor();const id=document.querySelector('#workEditor')?.dataset.id;update(s=>{const w=s.works.find(x=>x.id===id);if(w){w.documentPages.push(ensureStructuredPage({id:'doc-'+crypto.randomUUID(),html:'<p><br></p>'}));s.ui.documentPageIndex=w.documentPages.length-1;s.ui.canvasSelectedObjectId=null;}});editorRoot.history.clear();render();return;}
+  if(action==='studio-select'){syncStudioEditor();editorRoot.history.clear();update(s=>{s.ui.selectedStudioWorkId=el.dataset.id;s.ui.page='create';s.ui.documentPageIndex=0;s.ui.bookPageIndex=0;s.ui.bookViewMode=false;s.ui.bookSpreadIndex=0;s.ui.canvasSelectedObjectId=null;},{persist:false});render();return;}
   if(action==='save-work') return saveWork('draft');
   if(action==='publish-work') return saveWork('published');
   if(action==='open-publish-checklist') return publishChecklistDialog();
@@ -1035,18 +1150,30 @@ app.addEventListener('click',async e=>{
   if(action==='font-up'){readerFont=Math.min(26,readerFont+1);render();return;}
   if(action==='font-down'){readerFont=Math.max(14,readerFont-1);render();return;}
   if(action==='toggle-reader-theme'){readerTheme=(readerTheme+1)%3;render();return;}
+  if(action==='remove-profile-media') return handleProfileMediaRemoval(el.dataset.kind);
   if(action==='edit-profile') return profileDialog();
   if(action==='toggle-chat-panel'){toggleChatPanel();return;}
-  if(action==='chat-tab'){update(s=>{s.ui.chatTab=el.dataset.tab;s.ui.chatPanelOpen=true;const pool=s.chatThreads.filter(t=>el.dataset.tab==='groups'?t.type==='group':t.type==='dm');if(pool.length&&!pool.some(t=>t.id===s.ui.selectedChatId))s.ui.selectedChatId=pool[0].id;},{persist:false});render();return;}
-  if(action==='open-thread'){update(s=>{s.ui.selectedChatId=el.dataset.id;s.ui.chatPanelOpen=true;const t=s.chatThreads.find(x=>x.id===el.dataset.id);s.ui.chatTab=t?.type==='group'?'groups':'chats';},{persist:false});await refreshCloudChats(false);render();return;}
-  if(action==='select-thread'){update(s=>{s.ui.selectedChatId=el.dataset.id;},{persist:false});await refreshCloudChats(false);render();return;}
+  if(action==='chat-tab'){chatSelectionIntent++;update(s=>{s.ui.chatTab=el.dataset.tab;s.ui.chatPanelOpen=true;const pool=s.chatThreads.filter(t=>el.dataset.tab==='groups'?t.type==='group':t.type==='dm');if(pool.length&&!pool.some(t=>t.id===s.ui.selectedChatId))s.ui.selectedChatId=pool[0].id;},{persist:false});render();await refreshCloudChats(true);return;}
+  if(action==='open-thread'){
+    chatSelectionIntent++;
+    const changed=state.ui.selectedChatId!==el.dataset.id||!state.ui.chatPanelOpen;
+    update(s=>{s.ui.selectedChatId=el.dataset.id;s.ui.chatPanelOpen=true;const t=s.chatThreads.find(x=>x.id===el.dataset.id);s.ui.chatTab=t?.type==='group'?'groups':'chats';},{persist:false});
+    if(changed)render();
+    await refreshCloudChats(true);return;
+  }
+  if(action==='select-thread'){
+    chatSelectionIntent++;
+    if(state.ui.selectedChatId!==el.dataset.id){update(s=>{s.ui.selectedChatId=el.dataset.id;},{persist:false});render();}
+    await refreshCloudChats(true);return;
+  }
   if(action==='open-chat-person') return openChatWithPerson(el.dataset.id);
   if(action==='new-collab-group') return collaborationGroupDialog();
   if(action==='start-call') return startCall(el.dataset.id,el.dataset.mode||'audio');
   if(action==='accept-cloud-call') return acceptCloudCall(el.dataset.id);
   if(action==='decline-cloud-call') return declineCloudCall(el.dataset.id);
   if(action==='end-call') return endCall(true);
-});
+  throw new Error(`Неизвестное действие: ${action}`);
+}
 
 
 app.addEventListener('change',e=>{
@@ -1054,7 +1181,13 @@ app.addEventListener('change',e=>{
   execEditorCommand(sel.dataset.command,sel.value);
 });
 
-app.addEventListener('submit',async e=>{
+app.addEventListener('submit',e=>{
+  const form=e.target;
+  if(!['annotationForm','reviewForm','postForm','reportForm','authorVerificationForm','postCommentForm','evaluationFiltersForm','evaluationSessionForm','readFiltersForm','communityForm','profileForm','replyReviewForm','friendForm','collabGroupForm'].includes(form.id)&&!form.matches('.thread-message-form'))return;
+  e.preventDefault();
+  void withBusy(e.submitter||form.querySelector('button.primary'),()=>dispatchSubmit(e)).catch(error=>notify(`Не удалось сохранить: ${error.message}`));
+});
+async function dispatchSubmit(e){
   if(e.target.id==='annotationForm'){e.preventDefault();await saveAnnotation(new FormData(e.target));}
   if(e.target.id==='reviewForm'){e.preventDefault();await submitReview(new FormData(e.target));}
   if(e.target.id==='postForm'){e.preventDefault();await submitPost(new FormData(e.target));}
@@ -1070,29 +1203,33 @@ app.addEventListener('submit',async e=>{
   if(e.target.id==='friendForm'){e.preventDefault();await addFriend(new FormData(e.target));}
   if(e.target.id==='collabGroupForm'){e.preventDefault();await saveCollaborationGroup(new FormData(e.target));}
   if(e.target.matches('.thread-message-form')){e.preventDefault();await sendThreadMessage(e.target,new FormData(e.target));}
-});
+}
 
 async function openChatWithPerson(personId){
   const p=state.peopleDirectory.find(x=>x.id===personId); if(!p)return;
+  const intent=++chatSelectionIntent;
   try{
     animateChatOpen=!state.ui.chatPanelOpen;
     const id=await getOrCreateDirectConversation(personId);
+    if(intent!==chatSelectionIntent)return;
     update(s=>{s.ui.selectedChatId=id;s.ui.chatTab='chats';s.ui.chatPanelOpen=true;},{persist:false});
-    await refreshCloudChats(false);render();
+    render();await refreshCloudChats(true);
   }catch(err){alert(`Не удалось открыть чат: ${err.message}`);}
 }
 
 async function addFriend(fd){
   const username=String(fd.get('username')||'').trim().replace(/^@/,'');
   if(!username)return;
+  const intent=++chatSelectionIntent;
   try{
     const p=await findProfileByUsername(username);
     if(!p){notify(`@${username} не найден`);return;}
     if(p.id===state.user.id){notify('Нельзя написать самому себе');return;}
     animateChatOpen=!state.ui.chatPanelOpen;
     const id=await getOrCreateDirectConversation(p.id);
+    if(intent!==chatSelectionIntent)return;
     update(s=>{s.ui.selectedChatId=id;s.ui.chatTab='chats';s.ui.chatPanelOpen=true;},{persist:false});
-    await refreshCloudChats(false);render();
+    render();await refreshCloudChats(true);
   }catch(err){alert(`Не удалось добавить пользователя: ${err.message}`);}
 }
 
@@ -1100,10 +1237,10 @@ async function sendThreadMessage(form,fd){
   const text=String(fd.get('message')||'').trim(); if(!text)return;
   const id=form.dataset.thread;
   try{
-    form.querySelector('input[name="message"]').value='';
     await sendCloudMessage(id,text);
-    update(s=>s.ui.selectedChatId=id,{persist:false});
-    await refreshCloudChats(false);render();
+    const input=form.querySelector('input[name="message"]');
+    if(form.isConnected&&input?.value===text)input.value='';
+    await refreshCloudChats(true);
   }catch(err){alert(`Сообщение не отправлено: ${err.message}`);}
 }
 
@@ -1145,28 +1282,30 @@ function collaborationGroupDialog(){
 
 async function saveCollaborationGroup(fd){
   const name=String(fd.get('name')||'').trim(); if(!name)return;
+  const intent=++chatSelectionIntent;
   try{
     const members=fd.getAll('members');
     const id=await createCloudGroupConversation(name,members);
+    if(intent!==chatSelectionIntent)return;
     update(s=>{s.ui.selectedChatId=id;s.ui.chatTab='groups';s.ui.chatPanelOpen=true;s.ui.modal=null;},{persist:false});
-    await refreshCloudChats(false);render();
+    render();await refreshCloudChats(true);
   }catch(err){alert(`Группа не создана: ${err.message}`);}
 }
 
 async function startCall(threadId,mode){
-  const t=state.chatThreads.find(x=>x.id===threadId); if(!t)return;
-  if(t.type!=='dm'){notify('Реальные групповые звонки пока не включены. Откройте личный чат.');return;}
-  if(activeRtc){notify('Сначала завершите текущий звонок');return;}
+  const thread=state.chatThreads.find(item=>item.id===threadId);if(!thread)return;
+  if(thread.type!=='dm'){notify('Групповые звонки — скоро. Откройте личный чат.');return;}
+  if(activeRtc||callSetupPending){notify('Сначала завершите текущий звонок');return;}
+  callSetupPending=true;let createdCallId=null;
   try{
-    const peer=await getConversationPeer(threadId);
-    const call=await createCloudCall(threadId,mode);
-    if(!call)throw new Error('Сервер не создал звонок');
-    await setupRtc({callId:call.id,conversationId:threadId,peerId:peer.id,title:peer.nickname||peer.username||t.title,mode:call.mode,initiator:true});
-    render();
-  }catch(err){
-    if(activeRtc)await finishLocalCall(false);
-    alert(`Не удалось начать звонок: ${err.message}`);
-  }
+    const peer=await getConversationPeer(threadId),call=await createCloudCall(threadId,mode);
+    if(!call)throw new Error('Сервер не создал звонок');createdCallId=call.id;
+    await setupRtc({callId:call.id,conversationId:threadId,peerId:peer.id,title:peer.nickname||peer.username||thread.title,mode:call.mode,initiator:true});render();
+  }catch(error){
+    if(activeRtc?.callId===createdCallId)await finishLocalCall(true);
+    else if(createdCallId){const result=await Promise.allSettled([setCloudCallStatus(createdCallId,'ended')]);if(result[0].status==='rejected')notify('Не удалось подтвердить завершение звонка на сервере');}
+    notify(`Не удалось начать звонок: ${error.message}`);
+  }finally{callSetupPending=false;}
 }
 
 async function endCall(updateServer=true){
@@ -1186,9 +1325,9 @@ function openWorkDetails(id){
 }
 function openWork(id){
   const w=state.works.find(x=>x.id===id); if(!w||w.publicationStatus!=='published'){notify('Полная версия этого произведения пока не опубликована');return;}
-  update(s=>{s.ui.selectedWorkId=id;s.ui.readerBookIndex=0;s.ui.page='reader'; if(!s.library.reading.includes(id)&&!s.library.completed.includes(id))s.library.reading.push(id); if(s.readingProgress[id]==null)s.readingProgress[id]=0;}); if(w.cloud)saveCloudReadingProgress(w,{progress:Number(state.readingProgress[id]||0),status:'reading'}).catch(()=>{});render();
+  update(s=>{s.ui.selectedWorkId=id;s.ui.readerBookIndex=0;s.ui.page='reader'; if(!s.library.reading.includes(id)&&!s.library.completed.includes(id))s.library.reading.push(id); if(s.readingProgress[id]==null)s.readingProgress[id]=0;}); if(w.cloud)saveCloudReadingProgress(w,{progress:Number(state.readingProgress[id]||0),status:'reading'}).catch(error=>notify(`Прогресс сохранён на устройстве, но не синхронизирован: ${error.message}`));render();
 }
-async function toggleLibrary(bucket,id){ let added=false;update(s=>{const a=s.library[bucket];const i=a.indexOf(id);if(i>=0)a.splice(i,1);else{a.push(id);added=true;}});const w=state.works.find(x=>x.id===id);if(w?.cloud&&bucket==='later')await saveCloudReadingProgress(w,{progress:Number(state.readingProgress[id]||0),status:added?'read_later':'reading'}).catch(()=>{});render(); }
+async function toggleLibrary(bucket,id){ let added=false;update(s=>{const a=s.library[bucket];const i=a.indexOf(id);if(i>=0)a.splice(i,1);else{a.push(id);added=true;}});const w=state.works.find(x=>x.id===id);if(w?.cloud&&bucket==='later')await saveCloudReadingProgress(w,{progress:Number(state.readingProgress[id]||0),status:added?'read_later':'reading'}).catch(error=>notify(`Прогресс сохранён на устройстве, но не синхронизирован: ${error.message}`));render(); }
 
 function saveReadFilters(fd){
   update(s=>{s.ui.readFilters={query:String(fd.get('query')||'').trim(),genre:String(fd.get('genre')||''),length:String(fd.get('length')||'')};s.ui.page='read';},{persist:true});render();
@@ -1214,7 +1353,7 @@ function openCatalogEvaluation(versionId){
 async function advanceEvaluationSession(){
   const session=state.evaluationSession;if(!session)return;const item=session.items[session.currentIndex];
   if(!String(session.id).startsWith('catalog:')){try{await completeEvaluationItem(session.id,item.position);}catch(error){alert(`Прогресс не сохранён: ${error.message}`);return;}}
-  const next=advanceSession(session);update(s=>{s.evaluationSession=next;s.ui.selectedQuote='';if(next.status==='completed'){s.ui.page='evaluate';s.ui.evaluationMode=null;}},{persist:false});if(next.status==='completed')notify('Сессия завершена');else render();
+  const next=advanceSession(session);update(s=>{s.evaluationSession=next;s.ui.selectedQuote='';if(next.status==='completed'){s.ui.page='evaluate';s.ui.evaluationMode=null;}},{persist:false});render();if(next.status==='completed')notify('Сессия завершена');
 }
 function startEvaluation(){
   const candidates=pages.getEvaluationCandidates();
@@ -1294,11 +1433,12 @@ async function submitReview(fd){
     s.ui.modal=null;
   });
   const localReview=state.reviews.find(x=>x.workId===workId&&x.version===w.version&&x.authorId===state.user.id&&((x.scope||'evaluation')===scope));
-  if(w.cloud&&localReview){try{const savedReview=await saveCloudReview({work:w,review:localReview});if(savedReview)update(s=>{const r=s.reviews.find(x=>x.id===localReview.id);if(r){r.cloud=true;r.cloudId=savedReview.id;}},{persist:true});}catch(err){alert(`Рецензия сохранена локально, но не отправлена на сервер: ${err.message}`);}}
-  if(scope==='full'&&w.cloud)saveCloudReadingProgress(w,{progress:100,status:'completed'}).catch(()=>{});
+  if(w.cloud&&localReview){try{const savedReview=await saveCloudReview({work:w,review:localReview});if(savedReview)update(s=>{const r=s.reviews.find(x=>x.id===localReview.id);if(r){r.cloud=true;r.cloudId=savedReview.id;}},{persist:true});}catch(err){alert(`Рецензия сохранена локально, но не отправлена на сервер: ${err.message}`);render();return;}}
+  if(scope==='full'&&w.cloud)saveCloudReadingProgress(w,{progress:100,status:'completed'}).catch(error=>notify(`Прогресс сохранён на устройстве, но не синхронизирован: ${error.message}`));
   if(scope==='evaluation'){
     openModal(`<div class="review-success"><span class="eyebrow">Рецензия опубликована</span><h2>${wasFirst?`+${earned} XP`:'Рецензия обновлена'}</h2><p>Отзыв привязан к версии ${esc(w.version)}. Можно сразу перейти к следующему короткому отрывку.</p><div class="actions"><button data-action="navigate" data-page="evaluate">Закончить</button><button class="primary" data-action="evaluate-next">ОЦЕНИТЬ ДАЛЕЕ →</button></div></div>`);
   }else{
+    render();
     notify(wasFirst?`Произведение прочитано. +${earned} XP за рецензию`:'Рецензия обновлена');
   }
 }
@@ -1318,13 +1458,31 @@ function collectEditor(){
   const f=document.querySelector('#workEditor');if(!f)return null;syncStudioEditor();const fd=new FormData(f);const w=state.works.find(x=>x.id===f.dataset.id);if(!w)return null;
   let content='';
   if(w.editorMode==='book') content=(w.bookPages||[]).filter(p=>p.type==='content').map(p=>(p.canvas?.objects||[]).filter(o=>o.type==='text').map(o=>textFromHtml(o.html)).filter(Boolean).join('\n')).filter(Boolean).join('\n\n');
-  else content=(w.documentPages||[]).map(p=>textFromHtml(p.html)).filter(Boolean).join('\n\n');
+  else content=(w.documentPages||[]).map(p=>(p.canvas?.objects||[]).filter(o=>o.type==='text').map(o=>textFromHtml(o.html)).filter(Boolean).join('\n')).filter(Boolean).join('\n\n');
   const evaluationText=w.creationType==='fragment'?content:String(fd.get('evaluationText')||w.evaluationText||'');
   return {id:f.dataset.id,title:String(fd.get('title')||w.title||'').trim(),kind:fd.get('kind')||w.kind,genres:fd.getAll('genres').map(String).filter(Boolean),summary:String(fd.get('summary')||'').trim(),targetType:String(fd.get('targetType')||w.targetType||'Фрагмент'),evaluationTarget:String(fd.get('evaluationTarget')||w.evaluationTarget||'Фрагмент').trim(),evaluationText,feedbackWanted:fd.getAll('feedback'),formatId:Number(fd.get('formatId'))||null,genreIds:fd.getAll('genres').map(name=>Number(state.catalogs.genres.find(item=>item.name===name)?.id)).filter(Number.isFinite).slice(0,3),audienceIds:fd.getAll('audienceIds').map(Number).filter(Number.isFinite),tagIds:fd.getAll('tagIds').map(Number).filter(Number.isFinite).slice(0,30),content};
 }
+function confirmEditorCloudIdentity(local,newId,fields){
+  const oldId=local.id;const form=document.querySelector('#workEditor');
+  if(form?.dataset.id===oldId)syncStudioEditor();
+  update(s=>{
+    Object.assign(local,fields,{id:newId,cloud:true});
+    if(s.ui.selectedStudioWorkId===oldId)s.ui.selectedStudioWorkId=newId;
+    if(s.ui.selectedWorkId===oldId)s.ui.selectedWorkId=newId;
+    for(const key of ['later','reading','completed'])s.library[key]=s.library[key].map(id=>id===oldId?newId:id);
+    if(s.readingProgress[oldId]!=null){s.readingProgress[newId]=s.readingProgress[oldId];delete s.readingProgress[oldId];}
+  });
+  if(form?.dataset.id===oldId)form.dataset.id=newId;
+  document.querySelectorAll('[data-action="studio-select"]').forEach(button=>{if(button.dataset.id===oldId)button.dataset.id=newId;});
+}
 async function saveWork(mode='draft'){
+  const editing=currentCanvasState()?.w;
+  if(editing){const pending=collectEditor();if(pending)Object.assign(editing,pending);}
+  if(editing){try{await migrateLegacyWorkAssets(editing);assertWorkMediaReady(editing);}catch(error){notify(`Изображения не сохранены: ${error.message}`);return;}}
   const x=collectEditor(); if(!x||!x.title){alert('Укажите название.');return;}
   const current=state.works.find(z=>z.id===x.id); const fragment=current?.creationType==='fragment';
+  if(mode!=='draft'&&(!isCloudAuthenticated()||!state.user?.verified)){notify('Для публикации нужна активная сессия подтверждённого автора');return;}
+  const previousPublication={publicationStatus:current.publicationStatus,evaluationStatus:current.evaluationStatus,status:current.status,publishedAt:current.publishedAt};
   if(mode==='published'&&!x.content.trim()){alert('Чтобы опубликовать полное произведение, добавьте текст.');return;}
   if(mode==='evaluation'&&!x.evaluationText.trim()&&!x.content.trim()){alert('Добавьте текст для оценки.');return;}
   update(s=>{
@@ -1338,37 +1496,71 @@ async function saveWork(mode='draft'){
   const local=state.works.find(z=>z.id===x.id);
   if(isCloudAuthenticated()&&state.user?.role==='author'&&state.user?.verified&&local){
     try{
-      if(fragment){const result=await saveCloudFragment(local,{publish:mode==='evaluation'});update(s=>{const w=s.works.find(z=>z.id===local.id);if(w){w.fragmentCloudId=result.id;w.publicationStatus=result.visibility==='public'?'published':'draft';}});notify(mode==='evaluation'?'Фрагмент опубликован для оценки':'Фрагмент сохранён');return;}
-      const result=await saveCloudWork(local,{mode});
+      if(fragment){const result=await studioCloudWrites.run(()=>saveCloudFragment(local,{publish:mode==='evaluation'}));if(!result?.id)throw new Error('Сервер не подтвердил сохранение фрагмента');confirmEditorCloudIdentity(local,`fragment:${result.id}`,{fragmentCloudId:result.id,publicationStatus:result.visibility==='public'?'published':'draft'});setStudioSaveStatus(local,'saved','Сохранено в облаке');notify(mode==='evaluation'?'Фрагмент опубликован для оценки':'Фрагмент сохранён');return;}
+      const result=await studioCloudWrites.run(()=>saveCloudWork(local,{mode}));
       await saveCloudWorkTaxonomy(result.work.id,{formatId:x.formatId,genreIds:x.genreIds,audienceIds:x.audienceIds,tagIds:x.tagIds});
-            const oldId=local.id;const newId=`cloud:${result.work.id}`;
-      update(s=>{const w=s.works.find(z=>z.id===oldId);if(!w)return;w.id=newId;w.cloud=true;w.cloudId=result.work.id;w.cloudVersionId=result.version.id;w.version=String(result.version.version_no);if(s.ui.selectedStudioWorkId===oldId)s.ui.selectedStudioWorkId=newId;if(s.ui.selectedWorkId===oldId)s.ui.selectedWorkId=newId;for(const key of ['later','reading','completed'])s.library[key]=s.library[key].map(id=>id===oldId?newId:id);if(s.readingProgress[oldId]!=null){s.readingProgress[newId]=s.readingProgress[oldId];delete s.readingProgress[oldId];}});
-    }catch(err){alert(`Локально сохранено, но Supabase не синхронизирован: ${err.message}`);return;}
+      confirmEditorCloudIdentity(local,`cloud:${result.work.id}`,{cloudId:result.work.id,cloudVersionId:result.version.id,version:String(result.version.version_no)});
+      setStudioSaveStatus(local,'saved','Сохранено в облаке');
+    }catch(err){Object.assign(local,previousPublication);save();setStudioSaveStatus(local,'error',`Не сохранено в облаке: ${err.message}`);alert(`Локально сохранено, но Supabase не синхронизирован: ${err.message}`);return;}
   }
   const msg=mode==='published'?'Произведение опубликовано в разделе «Читать»':mode==='evaluation'?'Текст опубликован в разделе «Оценить»':'Черновик сохранён'; notify(msg);
 }
 
 function closeEvaluation(){
   syncStudioEditor();const id=document.querySelector('#workEditor')?.dataset.id;const w=state.works.find(x=>x.id===id);if(!w)return;
-  update(s=>{w.evaluationStatus='closed';w.status=w.publicationStatus==='published'?'published':'draft';});notify('Приём новых оценок закрыт. Старые рецензии сохранены.');
+  update(s=>{w.evaluationStatus='closed';w.status=w.publicationStatus==='published'?'published':'draft';});render();notify('Приём новых оценок закрыт. Старые рецензии сохранены.');
 }
 function newVersion(){
   syncStudioEditor();const id=document.querySelector('#workEditor')?.dataset.id;const w=state.works.find(x=>x.id===id);if(!w)return;const [a,b]=w.version.split('.').map(Number);
-  update(s=>{w.version=`${a}.${(b||0)+1}`;w.cloudVersionId=null;w.publicationStatus='draft';w.evaluationStatus='closed';w.status='draft';});notify('Создана новая версия. Старые отзывы остались у предыдущей версии.');
+  update(s=>{w.version=`${a}.${(b||0)+1}`;w.cloudVersionId=null;w.publicationStatus='draft';w.evaluationStatus='closed';w.status='draft';});render();notify('Создана новая версия. Старые отзывы остались у предыдущей версии.');
 }
 
+let profileOperationPending=false;
 function profileDialog(){openModal(profileEditor(state.user,state.catalogs||{genres:[],topics:[]}), 'wide');}
+function setProfileOperationBusy(busy){
+  profileOperationPending=busy;
+  const form=document.querySelector('#profileForm');if(!form)return;
+  form.setAttribute('aria-busy',String(busy));
+  form.querySelectorAll('button,input[type="file"]').forEach(control=>{
+    control.disabled=busy||control.dataset.action==='remove-profile-media'&&!state.user?.[`${control.dataset.kind}Path`]&&!state.user?.[`${control.dataset.kind}Url`];
+  });
+}
+function applyProfileMediaResult(kind,result){
+  update(s=>{s.user[`${kind}Path`]=result.path;s.user[`${kind}Url`]=result.url;},{persist:true});
+  const preview=document.querySelector(`[data-profile-preview="${kind}"]`);
+  if(preview){if(result.url)preview.src=result.url;else preview.removeAttribute('src');preview.hidden=!result.url;}
+  const status=document.querySelector('#profileMediaStatus');if(status)status.textContent=result.warning||(result.path?'Изображение сохранено':'Изображение удалено');
+}
 async function handleProfileMedia(event,kind){
-  const file=event.target.files?.[0];if(!file)return;const status=document.querySelector('#profileMediaStatus');if(status)status.textContent='Загрузка…';event.target.disabled=true;
-  try{const prepared=await cropProfileImage(file,kind==='banner'?{aspect:3,width:1500,height:500}:{aspect:1,width:512,height:512});const result=await uploadProfileMedia(kind,prepared);update(s=>{if(kind==='banner'){s.user.bannerPath=result.path;s.user.bannerUrl=result.url;}else{s.user.avatarPath=result.path;s.user.avatarUrl=result.url;}},{persist:true});if(status)status.textContent='Изображение сохранено';}
-  catch(error){if(status)status.textContent='Ошибка загрузки';alert(error.message);}finally{event.target.disabled=false;event.target.value='';}
+  const file=event.target.files?.[0];if(!file||profileOperationPending)return;
+  const status=document.querySelector('#profileMediaStatus');if(status)status.textContent='Загрузка…';setProfileOperationBusy(true);
+  try{
+    const prepared=await cropProfileImage(file,kind==='banner'?{aspect:3,width:1500,height:500}:{aspect:1,width:512,height:512});
+    applyProfileMediaResult(kind,await uploadProfileMedia(kind,prepared));
+  }catch(error){if(status)status.textContent=`Ошибка загрузки: ${error.message}`;}
+  finally{event.target.value='';setProfileOperationBusy(false);}
+}
+async function handleProfileMediaRemoval(kind){
+  if(profileOperationPending)return;
+  const status=document.querySelector('#profileMediaStatus');if(status)status.textContent='Удаление…';setProfileOperationBusy(true);
+  try{applyProfileMediaResult(kind,await removeProfileMedia(kind));}
+  catch(error){if(status)status.textContent=`Изображение не удалено: ${error.message}`;}
+  finally{setProfileOperationBusy(false);}
 }
 async function saveProfile(fd){
+  if(profileOperationPending)return;
   const payload=profilePayload(fd);if(!payload.nickname||!payload.username){alert('Никнейм и username обязательны');return;}
   let favoriteBooks,socialLinks;try{favoriteBooks=parseRows(fd,'book',['title','authorName','externalUrl']).map(book=>({...book,externalUrl:book.externalUrl?normalizeUrl(book.externalUrl):''}));socialLinks=parseRows(fd,'social',['platform','label','url']).map(link=>({...link,label:link.label||link.platform,url:normalizeUrl(link.url)}));}catch(error){alert(error.message);return;}
   const preferences=normalizePreferences({wantedGenres:fd.getAll('wantedGenres'),unwantedGenres:fd.getAll('unwantedGenres'),wantedTopics:fd.getAll('wantedTopics'),unwantedTopics:fd.getAll('unwantedTopics')});
-  try{await Promise.all([updateMyProfile(payload),replaceMyProfileDetails({favoriteBooks,socialLinks,preferences})]);const [profile,details]=await Promise.all([getMyProfile(),fetchMyProfileDetails()]);const user=cloudUserFrom(profile,getSession()?.user,state.user);mergeProfileDetails(user,details,state.catalogs);update(s=>{s.user=user;s.ui.modal=null;});render();}
-  catch(error){alert(`Профиль не сохранён: ${error.message}`);}
+  const status=document.querySelector('#profileMediaStatus');if(status)status.textContent='Сохранение профиля…';setProfileOperationBusy(true);
+  let persisted=false;
+  try{
+    const profile=await saveMyProfile({profile:payload,favoriteBooks,socialLinks,preferences});persisted=true;
+    const user=cloudUserFrom(profile,getSession()?.user,state.user);update(s=>s.user=user);
+    const details=await fetchMyProfileDetails();mergeProfileDetails(user,details,state.catalogs);
+    update(s=>{s.user=user;s.ui.modal=null;});render();
+  }catch(error){if(status)status.textContent=persisted?`Профиль сохранён, но повторная загрузка не удалась: ${error.message}`:`Профиль не сохранён: ${error.message}`;}
+  finally{setProfileOperationBusy(false);}
 }
 
 async function bootstrap(){
@@ -1390,6 +1582,9 @@ async function bootstrap(){
   }else{
     stopCloudPolling();update(s=>{s.user=null;s.posts=[];s.chatThreads=[];s.peopleDirectory=[];s.friends=[];s.cloud={...(s.cloud||{}),connected:false};},{persist:false});
   }
+  if(currentRoute.work)update(s=>s.ui.selectedWorkId=currentRoute.work,{persist:false});
+  if(currentRoute.community)update(s=>s.ui.selectedCommunityId=currentRoute.community,{persist:false});
+  if(currentRoute.page==='post'){permalinkError=currentRoute.error||'';if(currentRoute.postId)await loadPermalink(currentRoute.postId,{renderAfter:false});}
   authReady=true;render();
 }
-bootstrap();
+bootstrap().catch(error=>{authReady=true;render();notify(`Не удалось запустить приложение: ${error.message}`);});
