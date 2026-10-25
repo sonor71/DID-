@@ -19,6 +19,7 @@ export class AssetService {
     const storagePath=`${workId}/${assetId}-${safeName}`;
     const uploaded=await this.upload(storagePath,file);
     const persistedPath=uploaded?.storagePath||storagePath;
-    return {assetId,storagePath:persistedPath,url:uploaded?.url||this.resolveUrl(persistedPath),name:file.name||'Изображение'};
+    const url=uploaded?.url||this.resolveUrl(persistedPath);
+    return {assetId:uploaded?.assetId||assetId,assetPath:persistedPath,storagePath:persistedPath,url,src:url,name:file.name||'Изображение'};
   }
 }

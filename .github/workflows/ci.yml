@@ -14,11 +14,12 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      # Temporary bootstrap until the restricted build environment can refresh package-lock.
-      - run: npm install --no-save eslint@10 typescript@6
+      - run: npx playwright-core install --with-deps chromium
+      - run: sudo apt-get install --no-install-recommends -y coturn
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run test
+      - run: npm run test:integration
       - run: npm run build
         env:
           VITE_SUPABASE_URL: https://ci-placeholder.supabase.co

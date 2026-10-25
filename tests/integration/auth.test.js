@@ -25,3 +25,11 @@ test('OTP surfaces the useful Supabase Auth response without exposing the key',a
     return true;
   });
 });
+
+test('logout clears the local session even when remote logout fails and reports the failure',async()=>{
+  globalThis.localStorage={getItem:()=>JSON.stringify({access_token:'fixture-session',user:{id:'fixture-user'}}),setItem(){},removeItem(){}};
+  const {signOut,getSession}=await import(`../../src/cloud.js?logoutFailure=${Date.now()}`);
+  globalThis.fetch=async()=>Response.json({message:'Remote logout unavailable'},{status:503});
+  await assert.rejects(signOut(),/503.*Remote logout unavailable/);
+  assert.equal(getSession(),null);
+});

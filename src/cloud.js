@@ -1,9 +1,19 @@
 import {config} from './config.js';
+import {assertWorkMediaReady} from './editor/MediaModel.js';
+import {assertPersistableDocument} from './editor/Serialization.js';
+import {cloudPostId} from './feed/PostLinks.js';
+import {profileMediaKind,validateProfileImage} from './profile/ProfileMediaService.js';
 const SUPABASE_URL=config.supabaseUrl;
 const SUPABASE_KEY=config.supabasePublishableKey;
 const SESSION_KEY='d20-supabase-session-v1';
 
 let session=loadSession();
+async function cloudFetch(url,options={}){
+  const controller=new globalThis.AbortController();
+  const timer=setTimeout(()=>controller.abort(new Error('Истекло время ожидания Supabase')),15000);
+  try{return await fetch(url,{...options,signal:options.signal||controller.signal});}
+  finally{clearTimeout(timer);}
+}
 
 function loadSession(){
   try{return JSON.parse(localStorage.getItem(SESSION_KEY)||'null');}catch{return null;}
@@ -26,7 +36,7 @@ async function parse(res,service='Supabase API'){
 }
 async function refreshSession(){
   if(!session?.refresh_token)return null;
-  const res=await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`,{method:'POST',headers:{apikey:SUPABASE_KEY,'Content-Type':'application/json'},body:JSON.stringify({refresh_token:session.refresh_token})});
+  const res=await cloudFetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`,{method:'POST',headers:{apikey:SUPABASE_KEY,'Content-Type':'application/json'},body:JSON.stringify({refresh_token:session.refresh_token})});
   const data=await parse(res,'Supabase Auth');return saveSession({...data,expires_at:Math.floor(Date.now()/1000)+(data.expires_in||3600)});
 }
 export async function ensureSession(){
@@ -95,7 +105,8 @@ export async function openFraktumGame(){
 }
 
 export async function signOut(){
-  if(session?.access_token){await fetch(`${SUPABASE_URL}/auth/v1/logout`,{method:'POST',headers:authHeaders(false)}).catch(()=>{});}saveSession(null);
+  try{if(session?.access_token){const response=await cloudFetch(`${SUPABASE_URL}/auth/v1/logout`,{method:'POST',headers:authHeaders(false)});await parse(response,'Supabase Auth');}}
+  finally{saveSession(null);}
 }
 
 export async function requestOtp({method,identifier,createUser=false,metadata={}}){
@@ -103,14 +114,14 @@ export async function requestOtp({method,identifier,createUser=false,metadata={}
   const body={[key]:identifier,create_user:!!createUser};
   if(createUser&&metadata&&Object.keys(metadata).length)body.data=metadata;
   if(method==='phone')body.channel='sms';
-  const res=await fetch(`${SUPABASE_URL}/auth/v1/otp`,{method:'POST',headers:{apikey:SUPABASE_KEY,'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const res=await cloudFetch(`${SUPABASE_URL}/auth/v1/otp`,{method:'POST',headers:{apikey:SUPABASE_KEY,'Content-Type':'application/json'},body:JSON.stringify(body)});
   return parse(res,'Supabase Auth');
 }
 
 export async function verifyOtp({method,identifier,token}){
   const body={type:method==='phone'?'sms':'email',token:String(token||'').trim()};
   if(method==='phone')body.phone=identifier;else body.email=identifier;
-  const res=await fetch(`${SUPABASE_URL}/auth/v1/verify`,{method:'POST',headers:{apikey:SUPABASE_KEY,'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const res=await cloudFetch(`${SUPABASE_URL}/auth/v1/verify`,{method:'POST',headers:{apikey:SUPABASE_KEY,'Content-Type':'application/json'},body:JSON.stringify(body)});
   const data=await parse(res,'Supabase Auth');
   if(data?.access_token)saveSession({...data,expires_at:Math.floor(Date.now()/1000)+(data.expires_in||3600)});
   return data;
@@ -119,7 +130,7 @@ export async function verifyOtp({method,identifier,token}){
 export async function checkServerConnection(){
   if(!SUPABASE_URL||!SUPABASE_KEY)return false;
   try{
-    const res=await fetch(`${SUPABASE_URL}/rest/v1/lit_profiles?select=id&limit=1`,{headers:{apikey:SUPABASE_KEY}});
+    const res=await cloudFetch(`${SUPABASE_URL}/rest/v1/lit_profiles?select=id&limit=1`,{headers:{apikey:SUPABASE_KEY}});
     if(!res.ok)return false;
     await res.text();
     return true;
@@ -128,7 +139,7 @@ export async function checkServerConnection(){
 
 export async function rest(path,{method='GET',body,headers={}}={}){
   await ensureSession();
-  const res=await fetch(`${SUPABASE_URL}/rest/v1/${path}`,{method,headers:{...authHeaders(body!==undefined),...headers},body:body===undefined?undefined:JSON.stringify(body)});
+  const res=await cloudFetch(`${SUPABASE_URL}/rest/v1/${path}`,{method,headers:{...authHeaders(body!==undefined),...headers},body:body===undefined?undefined:JSON.stringify(body)});
   return parse(res);
 }
 export async function rpc(name,body={}){
@@ -157,7 +168,17 @@ export async function createMyProfile({username,nickname='',firstName='',lastNam
 }
 export async function updateMyProfile(patch){
   await ensureSession(); if(!session?.user?.id)throw new Error('Нет облачной сессии');
-  const rows=await rest(`lit_profiles?id=eq.${session.user.id}`,{method:'PATCH',body:patch,headers:{Prefer:'return=representation'}});return rows?.[0]||null;
+  const rows=await rest(`lit_profiles?id=eq.${session.user.id}`,{method:'PATCH',body:patch,headers:{Prefer:'return=representation'}});
+  if(!rows?.[0])throw new Error('Supabase не вернул обновлённый профиль. Проверьте права UPDATE и RLS для lit_profiles');
+  return rows[0];
+}
+
+/** Core fields and normalized details are committed by one database transaction. */
+export async function saveMyProfile({profile,favoriteBooks=[],socialLinks=[],preferences}){
+  const result=await rpc('lit_update_my_profile',{p_profile:profile,p_books:favoriteBooks,p_links:socialLinks,p_wanted_genres:preferences.wantedGenres,p_unwanted_genres:preferences.unwantedGenres,p_wanted_topics:preferences.wantedTopics,p_unwanted_topics:preferences.unwantedTopics});
+  const updated=Array.isArray(result)?result[0]:result;
+  if(!updated?.id)throw new Error('Supabase не вернул сохранённый профиль');
+  return updated;
 }
 
 export async function fetchDiscoveryCatalogs(){
@@ -188,17 +209,50 @@ export async function replaceMyProfileDetails({favoriteBooks=[],socialLinks=[],p
 }
 
 export async function uploadProfileMedia(kind,file){
+  const {bucket,column}=profileMediaKind(kind);validateProfileImage(file,kind==='avatar'?5_242_880:8_388_608);
   await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Войдите в аккаунт');
-  const bucket=kind==='banner'?'lit-profile-banners':'lit-avatars',path=`${me}/${kind}.webp`;
-  const res=await fetch(`${SUPABASE_URL}/storage/v1/object/${bucket}/${path}`,{method:'POST',headers:{apikey:SUPABASE_KEY,Authorization:`Bearer ${session.access_token}`,'Content-Type':file.type,'x-upsert':'true'},body:file});await parse(res);
-  const column=kind==='banner'?'banner_path':'avatar_path';await updateMyProfile({[column]:path});return {path,url:publicObjectUrl(bucket,path)};
+  const previous=await getMyProfile();if(!previous)throw new Error('Профиль не найден');
+  const extension={'image/jpeg':'jpg','image/png':'png','image/webp':'webp'}[file.type];
+  const path=`${me}/${kind}-${crypto.randomUUID()}.${extension}`;
+  await uploadPublicMedia(bucket,path,file);
+  try{await updateMyProfile({[column]:path});}
+  catch(error){
+    try{await deleteProfileObject(bucket,path,me);}
+    catch(cleanupError){throw new Error(`${error.message}. Не удалось удалить незавершённую загрузку: ${cleanupError.message}`,{cause:error});}
+    throw error;
+  }
+  let warning='';
+  if(previous[column]&&previous[column]!==path){
+    try{await deleteProfileObject(bucket,previous[column],me);}
+    catch(error){warning=`Изображение сохранено, но прежний файл не удалён: ${error.message}`;}
+  }
+  return {path,url:publicObjectUrl(bucket,path),warning};
+}
+
+async function deleteProfileObject(bucket,path,me){
+  if(!String(path).startsWith(`${me}/`))throw new Error('Нельзя удалить чужое изображение профиля');
+  const res=await cloudFetch(`${SUPABASE_URL}/storage/v1/object/${bucket}`,{method:'DELETE',headers:authHeaders(),body:JSON.stringify({prefixes:[path]})});
+  await parse(res,'Supabase Storage');
+}
+
+export async function removeProfileMedia(kind){
+  const {bucket,column}=profileMediaKind(kind);
+  await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Войдите в аккаунт');
+  const previous=await getMyProfile();if(!previous)throw new Error('Профиль не найден');
+  await updateMyProfile({[column]:null});
+  let warning='';
+  if(previous[column]){
+    try{await deleteProfileObject(bucket,previous[column],me);}
+    catch(error){warning=`Изображение удалено из профиля, но файл в хранилище не удалён: ${error.message}`;}
+  }
+  return {path:'',url:'',warning};
 }
 
 const inFilter=ids=>ids.map(x=>`\"${String(x).replaceAll('"','')}\"`).join(',');
 export function publicObjectUrl(bucket,path){return `${SUPABASE_URL}/storage/v1/object/public/${bucket}/${String(path).split('/').map(encodeURIComponent).join('/')}`;}
 export async function uploadPublicMedia(bucket,path,file){
   await ensureSession(); if(!session?.access_token)throw new Error('Войдите в аккаунт');
-  const res=await fetch(`${SUPABASE_URL}/storage/v1/object/${bucket}/${path.split('/').map(encodeURIComponent).join('/')}`,{method:'POST',headers:{apikey:SUPABASE_KEY,Authorization:`Bearer ${session.access_token}`,'Content-Type':file.type||'application/octet-stream','x-upsert':'false'},body:file});
+  const res=await cloudFetch(`${SUPABASE_URL}/storage/v1/object/${bucket}/${path.split('/').map(encodeURIComponent).join('/')}`,{method:'POST',headers:{apikey:SUPABASE_KEY,Authorization:`Bearer ${session.access_token}`,'Content-Type':file.type||'application/octet-stream','x-upsert':'false'},body:file});
   await parse(res);return publicObjectUrl(bucket,path);
 }
 
@@ -206,11 +260,31 @@ export async function uploadWorkAsset(path,file){
   await ensureSession();if(!session?.user?.id)throw new Error('Войдите в аккаунт');
   if(!String(path).startsWith(`${session.user.id}/`))path=`${session.user.id}/${path}`;
   const url=await uploadPublicMedia('lit-work-assets',path,file);
-  return {storagePath:path,url};
+  try{
+    const readable=await cloudFetch(url,{method:'HEAD'});
+    if(!readable.ok)throw new Error('Файл загружен, но недоступен для чтения. Проверьте public-доступ bucket lit-work-assets; приватность существующего bucket не изменяется автоматически');
+    const rows=await rest('lit_editor_assets',{method:'POST',body:{owner_id:session.user.id,storage_path:path,original_name:file.name||'Изображение',mime_type:file.type,byte_size:file.size},headers:{Prefer:'return=representation'}});
+    const record=rows?.[0];if(!record?.id)throw new Error('Не удалось зарегистрировать изображение');
+    return {assetId:record.id,storagePath:path,url};
+  }catch(error){
+    const response=await cloudFetch(`${SUPABASE_URL}/storage/v1/object/lit-work-assets`,{method:'DELETE',headers:authHeaders(),body:JSON.stringify({prefixes:[path]})});
+    if(!response.ok)throw new Error(`${error.message}. Очистка незарегистрированного файла не удалась; повторите загрузку после проверки Storage.`);
+    throw error;
+  }
 }
 
 export async function fetchPublicFeed(){
   const posts=await rest('lit_posts?visibility=eq.public&select=id,author_id,post_type,body,work_id,version_id,created_at&order=created_at.desc&limit=50');
+  return hydratePublicPosts(posts);
+}
+
+export async function fetchPublicPost(id){
+  const postId=cloudPostId(id);
+  const posts=await rest(`lit_posts?id=eq.${postId}&visibility=eq.public&select=id,author_id,post_type,body,work_id,version_id,created_at&limit=1`);
+  return (await hydratePublicPosts(posts))[0]||null;
+}
+
+async function hydratePublicPosts(posts){
   if(!posts?.length)return [];
   const postIds=posts.map(p=>p.id);const authorIds=[...new Set(posts.map(p=>p.author_id))];
   const [profiles,media,likes,comments]=await Promise.all([
@@ -322,7 +396,7 @@ export async function fetchVerificationRequests(){
   return rest('lit_author_verification_requests?select=*&order=created_at.desc&limit=100');
 }
 export async function resolveAuthorVerification(id,status){
-  const rows=await rpc('lit_resolve_author_verification',{p_request:id,p_status:status});
+  const rows=await rpc('lit_resolve_author_verification_admin',{p_request:id,p_status:status});
   return Array.isArray(rows)?rows[0]:rows;
 }
 
@@ -333,8 +407,9 @@ const kindFromDb=(kind)=>({novel:'Роман',novella:'Повесть',story:'Р
 
 export async function fetchCloudLiterature(){
   await ensureSession();const me=session?.user?.id;if(!me)return {works:[],reviews:[]};
-  const works=await rest('lit_works?select=id,author_id,title,summary,kind,status,genres,topics,content_rating,cover_path,format_id,created_at,updated_at,published_at,writing_status&order=updated_at.desc&limit=200');
-  if(!works?.length)return {works:[],reviews:[]};
+  const [works,fragmentRows]=await Promise.all([rest('lit_works?select=id,author_id,title,summary,kind,status,genres,topics,content_rating,cover_path,format_id,created_at,updated_at,published_at,writing_status&order=updated_at.desc&limit=200'),rest(`lit_fragments?author_id=eq.${me}&select=id,author_id,title,content,plain_text,visibility,evaluation_open,published_at,created_at&order=updated_at.desc&limit=200`)]);
+  const fragments=(fragmentRows||[]).map(row=>({id:`fragment:${row.id}`,cloud:true,fragmentCloudId:row.id,authorId:row.author_id,author:'',title:row.title,summary:'',kind:'Фрагмент',genres:[],version:'1',content:row.plain_text||'',creationType:'fragment',editorMode:row.content?.editorMode||'document',documentPages:row.content?.documentPages||[{id:`fragment-page-${row.id}`,html:`<p>${String(row.plain_text||'').replace(/[&<>]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</p>`}],bookPages:row.content?.bookPages||[],mediaLibrary:row.content?.mediaLibrary||[],publicationStatus:row.visibility==='public'?'published':'draft',evaluationStatus:row.evaluation_open?'open':'closed',evaluationText:row.plain_text||'',feedbackWanted:row.content?.feedbackWanted||[],createdAt:row.created_at}));
+  if(!works?.length)return {works:fragments,reviews:[]};
   const workIds=works.map(w=>w.id);
   const [versions,profiles,reviews,workGenres,workAudiences,workTags]=await Promise.all([
     rest(`lit_work_versions?work_id=in.(${inFilter(workIds)})&select=id,work_id,version_no,title,content,plain_text,evaluation_open,evaluation_excerpt,evaluation_meta,published_at,created_at&order=version_no.desc`),
@@ -375,10 +450,11 @@ export async function fetchCloudLiterature(){
     return {id:`cloud-review:${r.id}`,cloud:true,cloudId:r.id,workId:uiIdByCloud[r.work_id]||`cloud:${r.work_id}`,version:String(vr?.version_no||''),scope:r.scope,authorId:r.reviewer_id,author:rp.nickname||rp.username||'Читатель',anonymous:!!r.anonymous,rating:Number(r.rating||0),comment:r.body||'',categories:r.category_ratings||{},annotations:r.annotations||[],reactions:{helpful:rs.filter(x=>x.reaction==='helpful').length,disagree:rs.filter(x=>x.reaction==='disagree').length,unhelpful:rs.filter(x=>x.reaction==='unhelpful').length},myReaction:rs.find(x=>x.user_id===me)?.reaction||null,createdAt:r.created_at};
   });
   for(const w of uiWorks){const rs=uiReviews.filter(r=>r.workId===w.id&&r.scope==='full');if(rs.length){w.rating=rs.reduce((a,r)=>a+r.rating,0)/rs.length;w.ratingsCount=rs.length;}}
-  return {works:uiWorks,reviews:uiReviews};
+  return {works:[...uiWorks,...fragments],reviews:uiReviews};
 }
 
 export async function saveCloudWork(local,{mode='draft'}={}){
+  assertWorkMediaReady(local);assertPersistableDocument(local);
   await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Сначала войдите');
   let workId=local.cloudId||null;
   const published=mode==='published'||local.publicationStatus==='published';
@@ -447,8 +523,9 @@ export async function fetchEvaluationCatalog({limit=24,offset=0}={}){
   return [...fragmentItems,...workItems].sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,pageSize);
 }
 export async function saveCloudFragment(local,{publish=true}={}){
+  assertWorkMediaReady(local);assertPersistableDocument(local);
   await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Войдите в аккаунт');
-  const payload={author_id:me,work_id:local.cloudId||null,version_id:local.cloudVersionId||null,title:local.title||'Без названия',content:{type:'doc',content:[{type:'paragraph',text:local.content||''}]},plain_text:local.content||'',visibility:publish?'public':'private',evaluation_open:publish,updated_at:new Date().toISOString(),...(publish?{published_at:local.publishedAt||new Date().toISOString()}:{})};
+  const payload={author_id:me,work_id:local.cloudId||null,version_id:local.cloudVersionId||null,title:local.title||'Без названия',content:{schemaVersion:2,creationType:'fragment',editorMode:local.editorMode||'document',documentPages:local.documentPages||[],bookPages:local.bookPages||[],mediaLibrary:local.mediaLibrary||[],feedbackWanted:local.feedbackWanted||[]},plain_text:local.content||'',visibility:publish?'public':'private',evaluation_open:publish,updated_at:new Date().toISOString(),...(publish?{published_at:local.publishedAt||new Date().toISOString()}:{})};
   if(local.fragmentCloudId){const rows=await rest(`lit_fragments?id=eq.${local.fragmentCloudId}&author_id=eq.${me}`,{method:'PATCH',body:payload,headers:{Prefer:'return=representation'}});return rows?.[0];}
   const rows=await rest('lit_fragments',{method:'POST',body:payload,headers:{Prefer:'return=representation'}});return rows?.[0];
 }
@@ -545,9 +622,13 @@ export async function fetchIncomingCalls(){
 export async function getCloudCall(callId){
   const rows=await rest(`lit_calls?id=eq.${callId}&select=*&limit=1`);return rows?.[0]||null;
 }
-export async function setCloudCallStatus(callId,status){
+export async function setCloudCallStatus(callId,status,{expectedStatus=null}={}){
+  if(!['ringing','active','ended','declined','missed'].includes(status))throw new TypeError('Недопустимый статус звонка');
   const patch={status};if(status==='active')patch.answered_at=new Date().toISOString();if(['ended','declined','missed'].includes(status))patch.ended_at=new Date().toISOString();
-  const rows=await rest(`lit_calls?id=eq.${callId}`,{method:'PATCH',body:patch,headers:{Prefer:'return=representation'}});return rows?.[0]||null;
+  const condition=expectedStatus?`&status=eq.${encodeURIComponent(expectedStatus)}`:'';
+  const rows=await rest(`lit_calls?id=eq.${callId}${condition}`,{method:'PATCH',body:patch,headers:{Prefer:'return=representation'}});
+  if(expectedStatus&&!rows?.length)throw new Error('Звонок уже завершён или принят');
+  return rows?.[0]||null;
 }
 export async function sendCloudCallSignal(callId,recipientId,signalType,payload={}){
   await ensureSession();const me=session?.user?.id;if(!me)throw new Error('Сначала войдите');

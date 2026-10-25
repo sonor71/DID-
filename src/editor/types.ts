@@ -36,6 +36,13 @@ export interface ImageObject extends CanvasObjectBase {
   type: 'image';
   assetId: string;
   storagePath: string;
+  assetPath: string;
+  url: string;
+  pageId: string;
+  layoutMode: 'flow' | 'free';
+  wrapMode: 'left' | 'right' | 'center' | 'wide' | 'none';
+  alt: string;
+  caption: string;
   previewUrl?: string;
   crop: { x: number; y: number; width: number; height: number };
   opacity: number;

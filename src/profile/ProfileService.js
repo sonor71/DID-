@@ -1,5 +1,9 @@
 export const SOCIAL_PLATFORMS=['Telegram','VK','YouTube','TikTok','X','Instagram','Website','Other'];
 
+export function profileTextState(profile={},fallback={}){
+  return Object.fromEntries([['firstName','first_name'],['lastName','last_name'],['bio','bio'],['currentStatus','current_status']].map(([field,column])=>[field,Object.hasOwn(profile||{},column)?profile[column]??'':fallback[field]??'']));
+}
+
 export function normalizeUrl(value){
   const raw=String(value||'').trim();if(!raw)return '';
   let parsed;try{parsed=new URL(raw);}catch{throw new TypeError('Введите полный URL, начинающийся с https://');}
